@@ -1,0 +1,28 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  @apply bg-paper-50 text-ink-800 font-sans antialiased;
+  background-image:
+    linear-gradient(180deg, rgba(243, 234, 216, 0.55), rgba(251, 248, 241, 0.9)),
+    repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 27px,
+      rgba(196, 92, 38, 0.06) 28px
+    );
+}
+
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus {
+  -webkit-text-fill-color: #1c2733;
+  transition: background-color 9999s ease-out 0s;
+}
