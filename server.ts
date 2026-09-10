@@ -14,7 +14,7 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'writzz_super_secret_jwt_key_development_2026';
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 
