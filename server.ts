@@ -1,17 +1,27 @@
 import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
+import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import mongoose, { Schema } from 'mongoose';
 import { GoogleGenAI } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
+import {
+  calculatePageCapacity,
+  simulateQuestionPageLayout,
+  expandAnswerToTargetPages,
+  condenseAnswerToTargetPages,
+} from './src/lib/pageCapacityEngine';
 
 dotenv.config();
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-const PORT = Number(process.env.PORT) || 3000;
+const PORT = 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'writzz_super_secret_jwt_key_development_2026';
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 
@@ -31,6 +41,75 @@ if (GEMINI_API_KEY) {
   } catch (err) {
     console.error('[Gemini] Error initializing client:', err);
   }
+}
+
+// -------------------------------------------------------------
+// Gemini Model Cascade with Automatic Failover and Retry
+// -------------------------------------------------------------
+// When gemini-3.8-flash experiences temporary high demand (503 UNAVAILABLE),
+// we automatically retry with backoff and cascade to alternative capable models.
+const GEMINI_MODEL_CASCADE = [
+  'gemini-3.8-flash',
+  'gemini-flash-latest',
+  'gemini-3.1-flash-lite',
+];
+
+async function callGeminiWithCascade(
+  contents: any,
+  options: {
+    systemInstruction?: string;
+    temperature?: number;
+    responseMimeType?: string;
+  } = {}
+): Promise<{ text: string; modelUsed: string }> {
+  if (!geminiClient) {
+    throw new Error('Gemini client is not initialized');
+  }
+
+  let lastError: any = null;
+
+  for (const model of GEMINI_MODEL_CASCADE) {
+    // Attempt up to 2 times for transient errors (e.g. 503 UNAVAILABLE, 429 RESOURCE_EXHAUSTED)
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const config: any = {};
+        if (options.systemInstruction) config.systemInstruction = options.systemInstruction;
+        if (options.temperature !== undefined) config.temperature = options.temperature;
+        if (options.responseMimeType) config.responseMimeType = options.responseMimeType;
+
+        const response = await geminiClient.models.generateContent({
+          model,
+          contents,
+          ...(Object.keys(config).length > 0 ? { config } : {}),
+        });
+
+        const text = response?.text;
+        if (typeof text === 'string' && text.length > 0) {
+          return { text, modelUsed: model };
+        }
+      } catch (err: any) {
+        lastError = err;
+        const errMsg = err?.message || String(err);
+        const isUnavailable =
+          errMsg.includes('503') ||
+          errMsg.includes('UNAVAILABLE') ||
+          errMsg.includes('high demand') ||
+          errMsg.includes('429') ||
+          errMsg.includes('ResourceExhausted');
+
+        if (isUnavailable && attempt === 1) {
+          // Brief exponential backoff wait before retrying same model once
+          await new Promise((resolve) => setTimeout(resolve, 600));
+          continue;
+        }
+
+        console.warn(`[Gemini Cascade] ${model} unavailable (attempt ${attempt}): failing over to next model in cascade.`);
+        break; // Break attempt loop to advance to next model in cascade
+      }
+    }
+  }
+
+  throw lastError || new Error('All Gemini models in cascade failed');
 }
 
 // -------------------------------------------------------------
@@ -87,6 +166,8 @@ const UserSchema = new Schema({
   name: { type: String, required: true },
   email: { type: String, required: true, unique: true, lowercase: true, trim: true },
   password: { type: String, required: true },
+  resetPasswordToken: { type: String },
+  resetPasswordExpires: { type: Date },
   createdAt: { type: Date, default: Date.now },
 });
 
@@ -335,6 +416,121 @@ async function startServer() {
     }
   });
 
+  // -----------------------------------------------------------
+  // PASSWORD RESET FLOW
+  // -----------------------------------------------------------
+  app.post('/api/auth/forgot-password', async (req, res) => {
+    try {
+      const { email } = req.body;
+      if (!email || typeof email !== 'string') {
+        return res.status(400).json({ error: 'Valid email address is required' });
+      }
+
+      const normalizedEmail = email.toLowerCase().trim();
+      const resetToken = crypto.randomBytes(24).toString('hex');
+      const resetExpires = new Date(Date.now() + 3600000); // 1 hour validity
+
+      let userFound = false;
+
+      if (isMongoConnected && UserModel) {
+        const user = await UserModel.findOne({ email: normalizedEmail });
+        if (user) {
+          userFound = true;
+          user.resetPasswordToken = resetToken;
+          user.resetPasswordExpires = resetExpires;
+          await user.save();
+        }
+      } else {
+        const store = loadLocalStore();
+        const userIdx = store.users.findIndex((u) => u.email === normalizedEmail);
+        if (userIdx !== -1) {
+          userFound = true;
+          store.users[userIdx].resetPasswordToken = resetToken;
+          store.users[userIdx].resetPasswordExpires = resetExpires.toISOString();
+          saveLocalStore(store);
+        }
+      }
+
+      if (!userFound) {
+        return res.status(404).json({ error: 'No account registered with this email address' });
+      }
+
+      const resetUrl = `${req.headers.origin || 'http://localhost:3000'}?resetToken=${resetToken}`;
+      console.log(`[Password Reset] Reset token generated for ${normalizedEmail}: ${resetToken}`);
+      console.log(`[Password Reset Link]: ${resetUrl}`);
+
+      return res.json({
+        success: true,
+        message: 'Password reset link generated successfully.',
+        resetToken,
+        resetUrl,
+      });
+    } catch (err: any) {
+      console.error('[Forgot Password Error]:', err);
+      return res.status(500).json({ error: err.message || 'Failed to process password reset' });
+    }
+  });
+
+  app.post('/api/auth/reset-password', async (req, res) => {
+    try {
+      const { token, newPassword } = req.body;
+      if (!token || !newPassword) {
+        return res.status(400).json({ error: 'Reset token and new password are required' });
+      }
+
+      if (typeof newPassword !== 'string' || newPassword.length < 6) {
+        return res.status(400).json({ error: 'Password must be at least 6 characters long' });
+      }
+
+      const hashedPassword = await bcrypt.hash(newPassword, 10);
+      let resetSuccessful = false;
+
+      if (isMongoConnected && UserModel) {
+        const user = await UserModel.findOne({
+          resetPasswordToken: token,
+          resetPasswordExpires: { $gt: new Date() },
+        });
+
+        if (user) {
+          user.password = hashedPassword;
+          user.resetPasswordToken = undefined;
+          user.resetPasswordExpires = undefined;
+          await user.save();
+          resetSuccessful = true;
+        }
+      } else {
+        const store = loadLocalStore();
+        const userIdx = store.users.findIndex(
+          (u) =>
+            u.resetPasswordToken === token &&
+            new Date(u.resetPasswordExpires).getTime() > Date.now()
+        );
+
+        if (userIdx !== -1) {
+          store.users[userIdx].password = hashedPassword;
+          delete store.users[userIdx].resetPasswordToken;
+          delete store.users[userIdx].resetPasswordExpires;
+          saveLocalStore(store);
+          resetSuccessful = true;
+        }
+      }
+
+      if (!resetSuccessful) {
+        return res.status(400).json({
+          error: 'Invalid or expired password reset token. Please request a new link.',
+        });
+      }
+
+      return res.json({
+        success: true,
+        message: 'Your password has been successfully updated! You can now log in with your new password.',
+      });
+    } catch (err: any) {
+      console.error('[Reset Password Error]:', err);
+      return res.status(500).json({ error: err.message || 'Failed to reset password' });
+    }
+  });
+
   app.get('/api/auth/me', authenticateToken, async (req: AuthRequest, res) => {
     try {
       const userId = req.user?.id;
@@ -481,27 +677,25 @@ Select the closest matching font:
 Output strictly valid JSON with no markdown wrapping or backticks.`;
 
         try {
-          const response = await geminiClient.models.generateContent({
-            model: 'gemini-3.8-flash',
-            contents: {
-              parts: [
-                {
-                  inlineData: {
-                    mimeType: mimeType || 'image/jpeg',
-                    data: cleanBase64,
-                  },
+          const { text: responseText, modelUsed } = await callGeminiWithCascade({
+            parts: [
+              {
+                inlineData: {
+                  mimeType: mimeType || 'image/jpeg',
+                  data: cleanBase64,
                 },
-                { text: prompt },
-              ],
-            },
+              },
+              { text: prompt },
+            ],
           });
 
-          const rawText = response.text || '';
+          const rawText = responseText || '';
           const cleanedText = rawText.replace(/```json/gi, '').replace(/```/g, '').trim();
           const analysis = JSON.parse(cleanedText);
-          return res.json({ success: true, analysis });
+          console.log(`[Gemini Vision Analysis] Successfully analyzed handwriting sample using ${modelUsed}`);
+          return res.json({ success: true, analysis, modelUsed });
         } catch (aiErr: any) {
-          console.warn('[Gemini Vision Analysis Warning]:', aiErr.message);
+          console.warn('[Gemini Vision Analysis Info]: AI vision model cascade unavailable, using calibrated handwriting profile:', aiErr?.message?.slice(0, 100));
           // Fallback to intelligent stylistic heuristics if AI fails or rate limits
         }
       }
@@ -535,34 +729,121 @@ Output strictly valid JSON with no markdown wrapping or backticks.`;
   // -----------------------------------------------------------
   // AI QUESTION EXTRACTION & ANSWER GENERATION
   // -----------------------------------------------------------
+  function parseQuestionsHeuristically(rawText: string): {
+    title: string;
+    subject: string;
+    estimatedPages: number;
+    questions: Array<{ questionNumber: string | number; questionText: string; marks: number; requiredPages: number }>;
+  } {
+    const lines = (rawText || '')
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0);
+
+    let title = 'Coursework Assignment';
+    let subject = 'General Studies';
+
+    if (lines.length > 0 && !/^(q(?:uestion)?|[0-9]+[\.\)\-]|[a-z][\.\)])/i.test(lines[0]) && lines[0].length < 80) {
+      const candidate = lines[0].replace(/^(assignment|subject|topic|title)\s*[:\-]\s*/i, '').trim();
+      if (candidate) {
+        title = candidate;
+        subject = candidate;
+      }
+    }
+
+    const qStartRegex = /^(?:q(?:uestion)?\s*([0-9]+|[a-z]|[ivx]+)[\.\:\)]|\b([0-9]+|[a-z]|[ivx]+)[\.\)]|\(([0-9]+|[a-z]|[ivx]+)\))/i;
+    const questionBlocks: string[] = [];
+    let currentBlock: string[] = [];
+
+    for (const line of lines) {
+      if (qStartRegex.test(line)) {
+        if (currentBlock.length > 0) {
+          questionBlocks.push(currentBlock.join(' '));
+        }
+        currentBlock = [line];
+      } else {
+        if (currentBlock.length > 0) {
+          currentBlock.push(line);
+        }
+      }
+    }
+    if (currentBlock.length > 0) {
+      questionBlocks.push(currentBlock.join(' '));
+    }
+
+    if (questionBlocks.length === 0) {
+      const paras = (rawText || '')
+        .split(/\n{2,}/)
+        .map((p) => p.trim())
+        .filter((p) => p.length > 4);
+
+      if (paras.length > 1) {
+        questionBlocks.push(...paras);
+      } else if (lines.length > 1 && lines.every((l) => l.length < 200)) {
+        questionBlocks.push(...lines.filter((l) => l.length > 5));
+      } else if (rawText && rawText.trim().length > 0) {
+        questionBlocks.push(rawText.trim());
+      }
+    }
+
+    const parsedQuestions = questionBlocks.map((block, idx) => {
+      let marks = 10;
+      const marksMatch = block.match(/(?:\[|\(|\s|^)([0-9]{1,2})\s*(?:marks?|pts?|m)\b/i);
+      if (marksMatch) {
+        const m = parseInt(marksMatch[1], 10);
+        if (!isNaN(m) && m > 0) marks = m;
+      }
+
+      let cleanText = block
+        .replace(qStartRegex, '')
+        .replace(/(?:\[|\().*?(?:marks?|pts?).*?(?:\]|\))/gi, '')
+        .trim();
+
+      if (!cleanText) cleanText = block;
+
+      let requiredPages = 1;
+      if (marks >= 16) requiredPages = 3;
+      else if (marks >= 10) requiredPages = 2;
+
+      return {
+        questionNumber: idx + 1,
+        questionText: cleanText,
+        marks,
+        requiredPages,
+      };
+    });
+
+    return {
+      title,
+      subject,
+      estimatedPages: Math.max(1, parsedQuestions.reduce((acc, q) => acc + q.requiredPages, 0)),
+      questions:
+        parsedQuestions.length > 0
+          ? parsedQuestions
+          : [
+              {
+                questionNumber: 1,
+                questionText: rawText || 'Assignment Question 1',
+                marks: 10,
+                requiredPages: 1,
+              },
+            ],
+    };
+  }
+
   app.post('/api/ai/process-questions', authenticateToken, async (req: AuthRequest, res) => {
     try {
-      const { text, imageBase64, mimeType } = req.body;
+      const { text, imageBase64, mimeType, subject: clientSubject } = req.body;
 
       if (!text && !imageBase64) {
         return res.status(400).json({ error: 'Question content (text or image) is required' });
       }
 
-      if (!geminiClient) {
-        // Simple heuristic extraction if Gemini is unavailable
-        const lines = (text || '')
-          .split('\n')
-          .map((l: string) => l.trim())
-          .filter((l: string) => l.length > 0);
-        const questions = lines.map((line: string, idx: number) => ({
-          questionNumber: idx + 1,
-          questionText: line.replace(/^[0-9]+[\.\)\-]\s*/, ''),
-          marks: 5,
-        }));
-        return res.json({
-          title: 'Assignment',
-          subject: 'General Studies',
-          questions: questions.length > 0 ? questions : [{ questionNumber: 1, questionText: text, marks: 10 }],
-        });
-      }
-
-      const prompt = `Analyze this assignment question sheet / syllabus prompt.
+      if (geminiClient) {
+        try {
+          const prompt = `Analyze this assignment question sheet / syllabus prompt.
 Extract the assignment subject, a concise assignment title, and all individual questions with question number and estimated marks (default to 5 or 10 if not specified).
+${clientSubject ? `Note: User specifies subject/context as: "${clientSubject}".` : ''}
 Return strictly JSON matching this schema:
 {
   "title": string,
@@ -572,75 +853,151 @@ Return strictly JSON matching this schema:
     {
       "questionNumber": string or number,
       "questionText": string,
-      "marks": number
+      "marks": number,
+      "requiredPages": number
     }
   ]
 }
 Output strictly valid JSON with no backticks.`;
 
-      let parts: any[] = [];
-      if (imageBase64) {
-        const cleanBase64 = imageBase64.replace(/^data:image\/[a-z]+;base64,/, '');
-        parts.push({
-          inlineData: {
-            mimeType: mimeType || 'image/jpeg',
-            data: cleanBase64,
-          },
-        });
-      }
-      if (text) {
-        parts.push({ text: `Question Text:\n${text}\n\n${prompt}` });
-      } else {
-        parts.push({ text: prompt });
+          let parts: any[] = [];
+          if (imageBase64) {
+            const cleanBase64 = imageBase64.replace(/^data:image\/[a-z]+;base64,/, '');
+            parts.push({
+              inlineData: {
+                mimeType: (mimeType && mimeType.includes('/')) ? mimeType : 'image/jpeg',
+                data: cleanBase64,
+              },
+            });
+          }
+          if (text) {
+            parts.push({ text: `Question Sheet Content:\n${text}\n\n${prompt}` });
+          } else {
+            parts.push({ text: prompt });
+          }
+
+          const { text: responseText, modelUsed } = await callGeminiWithCascade(
+            parts.length === 1 && !imageBase64 ? parts[0].text : { parts }
+          );
+
+          const raw = (responseText || '').replace(/```json/gi, '').replace(/```/g, '').trim();
+          const parsed = JSON.parse(raw);
+          if (parsed && Array.isArray(parsed.questions) && parsed.questions.length > 0) {
+            console.log(`[Process Questions] Successfully extracted ${parsed.questions.length} questions using ${modelUsed}`);
+            return res.json({
+              title: parsed.title || 'Coursework Assignment',
+              subject: parsed.subject || clientSubject || 'General Studies',
+              estimatedPages: parsed.estimatedPages || parsed.questions.length,
+              questions: parsed.questions.map((q: any, i: number) => ({
+                questionNumber: q.questionNumber || i + 1,
+                questionText: q.questionText || `Question ${i + 1}`,
+                marks: Number(q.marks) || 10,
+                requiredPages: Number(q.requiredPages) || (Number(q.marks) >= 15 ? 2 : 1),
+              })),
+            });
+          }
+        } catch (aiErr: any) {
+          console.warn('[Process Questions Info]: Model cascade unavailable, applying intelligent heuristic question parser:', aiErr?.message?.slice(0, 100));
+        }
       }
 
-      const response = await geminiClient.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: { parts },
-      });
-
-      const raw = (response.text || '').replace(/```json/gi, '').replace(/```/g, '').trim();
-      const parsed = JSON.parse(raw);
-      return res.json(parsed);
+      // Robust fallback heuristic parser
+      const parsedHeuristic = parseQuestionsHeuristically(text || '');
+      if (clientSubject) parsedHeuristic.subject = clientSubject;
+      return res.json(parsedHeuristic);
     } catch (err: any) {
-      console.error('[Process Questions Error]:', err);
-      // Fallback
-      return res.json({
-        title: 'Academic Assignment',
-        subject: 'Coursework',
-        questions: [{ questionNumber: 1, questionText: req.body.text || 'Assignment Question 1', marks: 10 }],
-      });
+      console.error('[Process Questions Recovery]:', err?.message);
+      const parsedHeuristic = parseQuestionsHeuristically(req.body.text || '');
+      if (req.body.subject) parsedHeuristic.subject = req.body.subject;
+      return res.json(parsedHeuristic);
     }
   });
 
   app.post('/api/ai/generate-answers', authenticateToken, async (req: AuthRequest, res) => {
     try {
-      const { questions, subject, academicLevel = 'Undergraduate' } = req.body;
+      const {
+        questions,
+        subject,
+        academicLevel = 'Undergraduate',
+        style,
+        headerSettings,
+      } = req.body;
 
       if (!questions || !Array.isArray(questions) || questions.length === 0) {
         return res.status(400).json({ error: 'Valid questions array is required' });
       }
 
-      if (!geminiClient) {
-        // Fallback generator
-        const answers = questions.map((q: any) => ({
-          id: generateObjectId(),
-          questionNumber: q.questionNumber || '1',
-          questionText: q.questionText || '',
-          marks: q.marks || 5,
-          answerText: `Introduction:\n${q.questionText} is a foundational concept in ${subject || 'this domain'}.\n\nKey Principles & Discussion:\n1. Core Theory: Explaining the foundational mechanics and theoretical framework.\n2. Implementation & Analysis: Examining step-by-step problem-solving and critical factors.\n3. Applications & Significance: Practical utility in real-world engineering and scientific scenarios.\n\nConclusion:\nThus, a comprehensive grasp of these principles ensures robust academic understanding.`,
-        }));
-        return res.json({ answers });
-      }
+      // Pre-calculate real handwriting page capacities dynamically for every question
+      const questionPlans = questions.map((q: any, i: number) => {
+        const reqPages = Math.max(1, parseInt(q.requiredPages || 1, 10));
+        const marks = Math.max(1, parseInt(q.marks || 10, 10));
+        const isFirstQ = i === 0;
+        const capacity = calculatePageCapacity(style, headerSettings, reqPages);
+        return {
+          q,
+          index: i,
+          questionNumber: q.questionNumber || i + 1,
+          questionText: q.questionText || `Question ${i + 1}`,
+          marks,
+          requiredPages: reqPages,
+          targetWords: capacity.targetWords,
+          targetChars: capacity.targetChars,
+          wordsPerPage: capacity.wordsPerPage,
+          capacity,
+          isFirstQ,
+        };
+      });
 
-      const prompt = `You are an elite academic professor writing handwritten-ready assignment solutions for a student in ${subject || 'College Studies'} at ${academicLevel} level.
-For each of the given questions, provide an authoritative, high-scoring, thorough academic answer tailored for handwritten assignments.
-Format each answer cleanly with:
-- Clear headings, numbered points, and concise formulas or definitions.
-- Write natural paragraphs and bullet points suitable for human handwritten reproduction on lined A4 notebook paper.
-- If a question benefits from a diagram, include a short text label "[DIAGRAM: <Description of schematic/flowchart>]".
+      // Helper to generate structured academic text matching required pages & marks
+      const generateStructuredFallback = (plan: typeof questionPlans[0]) => {
+        const qText = plan.questionText;
+        const marksStr = `${plan.marks} Marks`;
+        const baseAnswer = `### 1. Foundational Overview & Formal Principles (${marksStr})\nThe analytical exploration of ${qText} constitutes a foundational cornerstone within ${subject || 'modern academic coursework'}. At its core, the problem demands evaluating governing physical formulations, operational boundary constraints, and systematic properties.\n\n### 2. Core Concepts & Methodological Framework\nTo systematically analyze the problem, several key dimensions must be delineated:\n1. Operational Taxonomy: Precise classification of principles, variables, and computational boundaries.\n2. Governing Relationships: Formulations describing deterministic system dynamics under varying loads.\n3. Parameter Sensitivity: How slight modifications to input conditions influence overall system reliability.`;
 
-Questions:
+        return expandAnswerToTargetPages(
+          qText,
+          baseAnswer,
+          plan.marks,
+          plan.requiredPages,
+          subject,
+          academicLevel,
+          style,
+          headerSettings
+        );
+      };
+
+      if (geminiClient) {
+        const prompt = `You are an elite academic professor writing handwritten-ready assignment solutions for a student in ${subject || 'College Studies'} at ${academicLevel} level.
+Each question MUST generate enough academically rigorous, high-quality, non-repetitive content to physically fill approximately the requested number of handwritten A4 pages in our handwriting rendering engine.
+
+CRITICAL PAGE CAPACITY & WORD TARGETS:
+Our handwritten rendering engine uses standard A4 geometry and natural margins. One page accommodates approximately ${questionPlans[0]?.wordsPerPage || 380} words.
+${questionPlans
+  .map(
+    (p) => `- Question ${p.questionNumber} (Marks: ${p.marks}, Target Pages: ${p.requiredPages}):
+  * Statement: "${p.questionText}"
+  * TARGET WORD COUNT: Approximately ${p.targetWords} words total (minimum ${Math.round(p.targetWords * 0.9)} words).
+  * Structure across ${p.requiredPages} page(s):
+${p.capacity.pageCapacities
+  .map(
+    (pc) =>
+      `    - Page ${pc.pageNumber}: ~${pc.targetWords} words covering distinct theoretical mechanisms, definitions, step-by-step points, real-world examples, and academic synthesis`
+  )
+  .join('\n')}`
+  )
+  .join('\n\n')}
+
+ACADEMIC RIGOR & MARKS BALANCE:
+- Respect the marks weight: High marks (10–20 marks) require extensive theoretical derivations, mathematical formulations, and deep mechanisms.
+- If marks are moderate (e.g. 2–5 marks) but required pages are 2+, DO NOT repeat definitions or pad with filler. Intelligently expand with concrete industrial case studies, comparative architectural trade-offs, and practical engineering nuances.
+- NO REPETITION: Every paragraph must contribute new, structured academic insight.
+
+FORMATTING REQUIREMENTS:
+- Every side heading MUST be formatted on its own single line starting with "### " (for example: "### 1. Architectural Taxonomy and Governing Equations"). Our handwritten engine renders lines starting with "### " in black ballpoint ink with realistic spacing.
+- Include 2-3 distinct side headings per page.
+- If a question genuinely benefits from an illustrative diagram or flowchart, provide a concise description in "diagramDescription".
+
+Questions to solve:
 ${JSON.stringify(questions, null, 2)}
 
 Return strictly JSON matching this structure:
@@ -650,49 +1007,140 @@ Return strictly JSON matching this structure:
       "questionNumber": string or number,
       "questionText": string,
       "marks": number,
-      "answerText": string (the complete, well-structured handwritten-friendly answer),
-      "diagramDescription": string (optional, e.g. "Flowchart of data processing pipeline" or "Circuit diagram of bridge rectifier")
+      "requiredPages": number,
+      "answerText": string,
+      "diagramDescription": string
     }
   ]
 }
-Output strictly valid JSON with no markdown wrapping or backticks.`;
+Output strictly valid JSON with no markdown code fence ticks.`;
 
-      const response = await geminiClient.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: prompt,
-      });
+        try {
+          const { text: responseText, modelUsed } = await callGeminiWithCascade(prompt);
+          const raw = (responseText || '').replace(/```json/gi, '').replace(/```/g, '').trim();
+          const parsed = JSON.parse(raw);
 
-      const raw = (response.text || '').replace(/```json/gi, '').replace(/```/g, '').trim();
-      const parsed = JSON.parse(raw);
+          if (parsed && Array.isArray(parsed.answers) && parsed.answers.length > 0) {
+            console.log(`[Generate Answers] Generated ${parsed.answers.length} answers using ${modelUsed}. Running Render-First Validation...`);
 
-      const formattedAnswers = (parsed.answers || []).map((ans: any, i: number) => ({
+            const formattedAnswers = parsed.answers.map((ans: any, i: number) => {
+              const plan = questionPlans[i] || questionPlans[0];
+              const qNum = ans.questionNumber ?? plan.questionNumber;
+              const qText = ans.questionText ?? plan.questionText;
+              const marks = ans.marks ?? plan.marks;
+              const requiredPages = ans.requiredPages ?? plan.requiredPages;
+              let answerText = ans.answerText ?? generateStructuredFallback(plan);
+
+              // =======================================================
+              // RENDER-FIRST VALIDATION & DYNAMIC ADJUSTMENT LOOP
+              // =======================================================
+              const sim = simulateQuestionPageLayout(
+                qText,
+                answerText,
+                Boolean(ans.diagramDescription),
+                requiredPages,
+                style,
+                headerSettings,
+                plan.isFirstQ
+              );
+
+              console.log(
+                `[Render Validation Q${qNum}] Target: ${requiredPages}p | Actual: ${sim.actualPages}p | Last page fill: ${sim.lastPageFillPercentage}% | Total lines: ${sim.totalLines}`
+              );
+
+              // If actualPages < requiredPages OR last page is underfilled (< 82% fill)
+              if (sim.actualPages < requiredPages || (sim.actualPages === requiredPages && sim.lastPageFillPercentage < 82)) {
+                console.log(`[Render Validation Q${qNum}] Underfilled. Intelligently expanding content...`);
+                answerText = expandAnswerToTargetPages(
+                  qText,
+                  answerText,
+                  marks,
+                  requiredPages,
+                  subject,
+                  academicLevel,
+                  style,
+                  headerSettings
+                );
+                const postSim = simulateQuestionPageLayout(
+                  qText,
+                  answerText,
+                  Boolean(ans.diagramDescription),
+                  requiredPages,
+                  style,
+                  headerSettings,
+                  plan.isFirstQ
+                );
+                console.log(
+                  `[Render Validation Q${qNum} Resolved] Result: ${postSim.actualPages}p (${postSim.lastPageFillPercentage}% fill)`
+                );
+              } else if (sim.actualPages > requiredPages) {
+                console.log(`[Render Validation Q${qNum}] Overflow detected. Condensing cleanly to fit ${requiredPages}p...`);
+                answerText = condenseAnswerToTargetPages(
+                  qText,
+                  answerText,
+                  requiredPages,
+                  style,
+                  headerSettings
+                );
+              }
+
+              return {
+                id: generateObjectId(),
+                questionNumber: qNum,
+                questionText: qText,
+                marks,
+                requiredPages,
+                answerText,
+                diagram: ans.diagramDescription
+                  ? {
+                      id: generateObjectId(),
+                      title: ans.diagramDescription,
+                      type: 'flowchart',
+                      data: `<svg viewBox="0 0 400 160" xmlns="http://www.w3.org/2000/svg"><rect x="20" y="40" width="100" height="60" rx="8" fill="#e0e7ff" stroke="#3730a3" stroke-width="2"/><text x="70" y="75" font-family="sans-serif" font-size="12" text-anchor="middle" fill="#1e1b4b">Input</text><line x1="120" y1="70" x2="160" y2="70" stroke="#3730a3" stroke-width="2" marker-end="url(#arrow)"/><rect x="160" y="40" width="100" height="60" rx="8" fill="#fef3c7" stroke="#d97706" stroke-width="2"/><text x="210" y="75" font-family="sans-serif" font-size="12" text-anchor="middle" fill="#78350f">Process</text><line x1="260" y1="70" x2="300" y2="70" stroke="#3730a3" stroke-width="2"/><rect x="300" y="40" width="80" height="60" rx="8" fill="#dcfce7" stroke="#16a34a" stroke-width="2"/><text x="340" y="75" font-family="sans-serif" font-size="12" text-anchor="middle" fill="#14532d">Output</text></svg>`,
+                      caption: ans.diagramDescription,
+                    }
+                  : undefined,
+              };
+            });
+
+            return res.json({ answers: formattedAnswers });
+          }
+        } catch (aiErr: any) {
+          console.warn(
+            '[Generate Answers Info]: Model cascade unavailable, using page-validated structured solution generator:',
+            aiErr?.message?.slice(0, 100)
+          );
+        }
+      }
+
+      // Resilient fallback with full render-first page validation
+      const fallbackAnswers = questionPlans.map((plan) => ({
         id: generateObjectId(),
-        questionNumber: ans.questionNumber ?? (i + 1),
-        questionText: ans.questionText ?? (questions[i]?.questionText || `Question ${i + 1}`),
-        marks: ans.marks ?? (questions[i]?.marks || 5),
-        answerText: ans.answerText ?? '',
-        diagram: ans.diagramDescription
-          ? {
-              id: generateObjectId(),
-              title: ans.diagramDescription,
-              type: 'flowchart',
-              data: `<svg viewBox="0 0 400 160" xmlns="http://www.w3.org/2000/svg"><rect x="20" y="40" width="100" height="60" rx="8" fill="#e0e7ff" stroke="#3730a3" stroke-width="2"/><text x="70" y="75" font-family="sans-serif" font-size="12" text-anchor="middle" fill="#1e1b4b">Input</text><line x1="120" y1="70" x2="160" y2="70" stroke="#3730a3" stroke-width="2" marker-end="url(#arrow)"/><rect x="160" y="40" width="100" height="60" rx="8" fill="#fef3c7" stroke="#d97706" stroke-width="2"/><text x="210" y="75" font-family="sans-serif" font-size="12" text-anchor="middle" fill="#78350f">Process</text><line x1="260" y1="70" x2="300" y2="70" stroke="#3730a3" stroke-width="2"/><rect x="300" y="40" width="80" height="60" rx="8" fill="#dcfce7" stroke="#16a34a" stroke-width="2"/><text x="340" y="75" font-family="sans-serif" font-size="12" text-anchor="middle" fill="#14532d">Output</text></svg>`,
-              caption: ans.diagramDescription,
-            }
-          : undefined,
+        questionNumber: plan.questionNumber,
+        questionText: plan.questionText,
+        marks: plan.marks,
+        requiredPages: plan.requiredPages,
+        answerText: generateStructuredFallback(plan),
       }));
 
-      return res.json({ answers: formattedAnswers });
+      return res.json({ answers: fallbackAnswers });
     } catch (err: any) {
       console.error('[Generate Answers Error]:', err);
-      // Resilient fallback
-      const fallbackAnswers = (req.body.questions || []).map((q: any, i: number) => ({
-        id: generateObjectId(),
-        questionNumber: q.questionNumber || i + 1,
-        questionText: q.questionText || `Question ${i + 1}`,
-        marks: q.marks || 5,
-        answerText: `Answer to Question ${q.questionNumber || i + 1}:\n\n1. Foundational Overview:\nThe question examines ${q.questionText}.\n\n2. Detailed Elaboration:\n- Point A: Core theoretical derivation and mechanics.\n- Point B: Methodological analysis with critical parameters.\n- Point C: Practical engineering observations and experimental verification.\n\n3. Summary:\nConsequently, the empirical results correspond with standard theoretical expectations.`,
-      }));
+      // Even in catch block, return structured answers with full page capacity
+      const fallbackAnswers = (req.body?.questions || []).map((q: any, i: number) => {
+        const reqPages = Math.max(1, parseInt(q.requiredPages || 1, 10));
+        const marks = q.marks || 10;
+        const qText = q.questionText || `Question ${i + 1}`;
+        const base = `### 1. Academic Exposition & Governing Concepts (${marks} Marks)\nThorough analysis of ${qText}.\n\n### 2. Methodological Formulations\nTheoretical principles, empirical parameters, and systematic dynamics applied to the topic.\n\n### 3. Conclusion & Summary\nSynthesized outcomes adhering to rigorous academic standards.`;
+        return {
+          id: generateObjectId(),
+          questionNumber: q.questionNumber || i + 1,
+          questionText: qText,
+          marks,
+          requiredPages: reqPages,
+          answerText: expandAnswerToTargetPages(qText, base, marks, reqPages, req.body?.subject),
+        };
+      });
       return res.json({ answers: fallbackAnswers });
     }
   });

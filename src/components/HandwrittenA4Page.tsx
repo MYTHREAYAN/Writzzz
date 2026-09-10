@@ -101,10 +101,11 @@ export const HandwrittenA4Page = forwardRef<HTMLDivElement, HandwrittenA4PagePro
                       style={style}
                       lineIndex={idx}
                       className="font-bold"
+                      forceBlackInk={true}
                     />
                   </div>
 
-                  {/* Question Text */}
+                  {/* Question Text (rendered in Black Ink) */}
                   <div className="pl-5 flex-1">
                     <RealisticHandwrittenText
                       text={item.text || ''}
@@ -114,6 +115,29 @@ export const HandwrittenA4Page = forwardRef<HTMLDivElement, HandwrittenA4PagePro
                       }}
                       lineIndex={idx}
                       className="font-bold"
+                      forceBlackInk={true}
+                    />
+                  </div>
+                </div>
+              );
+            }
+
+            if (item.type === 'heading') {
+              return (
+                <div key={idx} className="relative flex items-start pt-2.5 pb-1">
+                  {/* Left Margin spacer */}
+                  <div className="w-[54px] shrink-0" />
+                  {/* Side Heading in Black Ink */}
+                  <div className="pl-5 flex-1 select-text">
+                    <RealisticHandwrittenText
+                      text={item.text || ''}
+                      style={{
+                        ...style,
+                        fontSize: (style.fontSize || 18) + 1.5,
+                      }}
+                      lineIndex={idx}
+                      className="font-bold underline decoration-neutral-400/50 underline-offset-4"
+                      forceBlackInk={true}
                     />
                   </div>
                 </div>

@@ -1,33 +1,39 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   Upload,
   Sparkles,
-  FileText,
   ArrowRight,
   ArrowLeft,
-  CheckCircle2,
+  Check,
   Plus,
   Trash2,
-  Loader2,
-  BookOpen,
+  FileText,
   Sliders,
-  Check,
-  Eye,
-  PenTool,
-  Save
+  RotateCcw,
+  CheckCircle2,
+  Calendar,
+  Layers,
+  Award
 } from 'lucide-react';
-import { AnswerItem, Assignment, HandwritingStyle } from '../types';
+import { useAuth } from '../context/AuthContext';
 import { api } from '../lib/api';
 import { useToast } from './Toast';
-import { SheetPaperSelector } from './SheetPaperSelector';
-import { SheetPaperBackground } from './SheetPaperBackground';
-import { RealisticHandwrittenText } from './RealisticHandwrittenText';
+import { Assignment, HandwritingStyle, AnswerItem } from '../types';
+import { calculatePageCapacity, simulateQuestionPageLayout } from '../lib/pageCapacityEngine';
 
 interface NewAssignmentWizardProps {
   onCancel: () => void;
-  onAssignmentCreated: (newAssignment: Assignment) => void;
+  onAssignmentCreated: (assignment: Assignment) => void;
   defaultHandwriting?: HandwritingStyle;
+}
+
+interface QuestionRow {
+  id: string;
+  questionNumber: string | number;
+  questionText: string;
+  marks: number;
+  requiredPages: number;
 }
 
 export const NewAssignmentWizard: React.FC<NewAssignmentWizardProps> = ({
@@ -35,6 +41,7 @@ export const NewAssignmentWizard: React.FC<NewAssignmentWizardProps> = ({
   onAssignmentCreated,
   defaultHandwriting,
 }) => {
+  const { user } = useAuth();
   const toast = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -43,7 +50,7 @@ export const NewAssignmentWizard: React.FC<NewAssignmentWizardProps> = ({
   // Step 1: Form & Question upload
   const [title, setTitle] = useState('');
   const [subject, setSubject] = useState('');
-  const [studentName, setStudentName] = useState('');
+  const [studentName, setStudentName] = useState(user?.name || '');
   const [rollNumber, setRollNumber] = useState('');
   const [submissionDate, setSubmissionDate] = useState(new Date().toISOString().split('T')[0]);
   const [rawQuestionsText, setRawQuestionsText] = useState('');
@@ -52,7 +59,8 @@ export const NewAssignmentWizard: React.FC<NewAssignmentWizardProps> = ({
   const [isProcessingQuestions, setIsProcessingQuestions] = useState(false);
 
   // Step 2: Extracted Questions Planner
-  const [questions, setQuestions] = useState<Array<{ id: string; questionNumber: string | number; questionText: string; marks: number }>>([]);
+  const [questions, setQuestions] = useState<QuestionRow[]>([]);
+  const [defaultPagesPerQuestion, setDefaultPagesPerQuestion] = useState(1);
   const [academicLevel, setAcademicLevel] = useState('Undergraduate');
   const [isGeneratingAnswers, setIsGeneratingAnswers] = useState(false);
 
@@ -76,43 +84,76 @@ export const NewAssignmentWizard: React.FC<NewAssignmentWizardProps> = ({
       baselineWander: 1,
     }
   );
+
+  const pageMetrics = useMemo(() => {
+    return calculatePageCapacity(selectedStyle, undefined, 5);
+  }, [selectedStyle]);
+
   const [isSavingToMongo, setIsSavingToMongo] = useState(false);
 
-  // File upload handler
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      const file = e.target.files[0];
-      setUploadedFileName(file.name);
-      const reader = new FileReader();
-      reader.onload = () => {
-        setQuestionImageBase64(reader.result as string);
-        toast.success('Question Document Loaded', file.name);
-      };
-      reader.readAsDataURL(file);
+  // Keep studentName updated if user loads late
+  useEffect(() => {
+    if (user?.name && !studentName) {
+      setStudentName(user.name);
     }
+  }, [user?.name]);
+
+  // Handle Image Upload for Question Extraction
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (!file.type.startsWith('image/')) {
+      toast.error('Invalid File', 'Please upload a clear JPG or PNG image of your question paper');
+      return;
+    }
+
+    setUploadedFileName(file.name);
+    const reader = new FileReader();
+    reader.onload = () => {
+      const base64 = reader.result as string;
+      setQuestionImageBase64(base64);
+      toast.success('Question Paper Uploaded', file.name);
+    };
+    reader.readAsDataURL(file);
   };
 
-  // Process questions with Gemini
+  // Process Questions with AI (or fall back to raw text parsing)
   const handleProcessQuestions = async () => {
     if (!title.trim() && !rawQuestionsText.trim() && !questionImageBase64) {
-      toast.error('Details required', 'Please provide an assignment title and enter questions or upload a question sheet');
+      toast.error('Input Required', 'Please enter a title, paste questions, or upload a question sheet');
       return;
     }
 
     setIsProcessingQuestions(true);
     try {
-      const res = await api.processQuestions(rawQuestionsText, questionImageBase64);
+      const mimeMatch = questionImageBase64 ? questionImageBase64.match(/^data:([^;]+);base64,/) : null;
+      const detectedMime = mimeMatch ? mimeMatch[1] : 'image/jpeg';
+      const cleanImgBase64 = questionImageBase64 ? questionImageBase64.replace(/^data:[^;]+;base64,/, '') : undefined;
+
+      const res = await api.processQuestions(
+        rawQuestionsText,
+        cleanImgBase64,
+        detectedMime,
+        subject
+      );
+
       if (res.title && !title) setTitle(res.title);
       if (res.subject && !subject) setSubject(res.subject);
 
       if (res.questions && res.questions.length > 0) {
         setQuestions(
-          res.questions.map((q, idx) => ({
-            id: Math.random().toString(36).substring(2, 9),
-            questionNumber: q.questionNumber || idx + 1,
-            questionText: q.questionText,
-            marks: q.marks || 10,
-          }))
+          res.questions.map((q, idx) => {
+            const parsedMarks = q.marks ? parseInt(String(q.marks), 10) : 10;
+            const parsedPages = q.requiredPages ? parseInt(String(q.requiredPages), 10) : defaultPagesPerQuestion;
+            return {
+              id: Math.random().toString(36).substring(2, 9),
+              questionNumber: q.questionNumber || idx + 1,
+              questionText: q.questionText,
+              marks: isNaN(parsedMarks) || parsedMarks < 1 ? 10 : parsedMarks,
+              requiredPages: isNaN(parsedPages) || parsedPages < 1 ? 1 : parsedPages,
+            };
+          })
         );
       } else {
         // Fallback split
@@ -122,21 +163,22 @@ export const NewAssignmentWizard: React.FC<NewAssignmentWizardProps> = ({
             questionNumber: 1,
             questionText: rawQuestionsText || 'Assignment Question 1',
             marks: 10,
+            requiredPages: defaultPagesPerQuestion,
           },
         ]);
       }
 
       setStep(2);
-      toast.success('Questions Analyzed', 'Review and fine-tune your assignment outline');
+      toast.success('Questions Analyzed', 'Review marks, target pages, and question wording');
     } catch (err: any) {
-      toast.error('Question Processing Failed', err.message);
-      // Resilient fallback: allow continuing with user's raw text
+      toast.error('Question Processing Note', 'Using raw question text as primary input');
       setQuestions([
         {
           id: Math.random().toString(36).substring(2, 9),
           questionNumber: 1,
           questionText: rawQuestionsText || 'Coursework Question 1',
           marks: 10,
+          requiredPages: defaultPagesPerQuestion,
         },
       ]);
       setStep(2);
@@ -152,12 +194,19 @@ export const NewAssignmentWizard: React.FC<NewAssignmentWizardProps> = ({
       return;
     }
 
+    // Validate that all questions have non-empty text and sensible marks
+    const hasEmptyQuestion = questions.some((q) => !q.questionText.trim());
+    if (hasEmptyQuestion) {
+      toast.error('Incomplete Questions', 'Please provide wording for all questions before generating');
+      return;
+    }
+
     setIsGeneratingAnswers(true);
     try {
-      const res = await api.generateAnswers(questions, subject, academicLevel);
+      const res = await api.generateAnswers(questions, subject, academicLevel, selectedStyle);
       setGeneratedAnswers(res.answers || []);
       setStep(3);
-      toast.success('Answers Generated!', 'Gemini drafted academic handwritten answers');
+      toast.success('Answers Generated!', 'Academic handwritten solutions drafted to target pages');
     } catch (err: any) {
       toast.error('Answer Generation Failed', err.message);
     } finally {
@@ -173,7 +222,8 @@ export const NewAssignmentWizard: React.FC<NewAssignmentWizardProps> = ({
         id: Math.random().toString(36).substring(2, 9),
         questionNumber: prev.length + 1,
         questionText: '',
-        marks: 5,
+        marks: 10,
+        requiredPages: defaultPagesPerQuestion,
       },
     ]);
   };
@@ -186,6 +236,22 @@ export const NewAssignmentWizard: React.FC<NewAssignmentWizardProps> = ({
     setQuestions((prev) => prev.map((q) => (q.id === id ? { ...q, questionText: text } : q)));
   };
 
+  const handleUpdateMarks = (id: string, marksVal: number) => {
+    const validMarks = isNaN(marksVal) || marksVal < 1 ? 1 : Math.min(100, Math.floor(marksVal));
+    setQuestions((prev) => prev.map((q) => (q.id === id ? { ...q, marks: validMarks } : q)));
+  };
+
+  const handleUpdatePages = (id: string, pagesVal: number) => {
+    const validPages = isNaN(pagesVal) || pagesVal < 1 ? 1 : Math.min(10, Math.floor(pagesVal));
+    setQuestions((prev) => prev.map((q) => (q.id === id ? { ...q, requiredPages: validPages } : q)));
+  };
+
+  const handleApplyDefaultPagesToAll = (pages: number) => {
+    setDefaultPagesPerQuestion(pages);
+    setQuestions((prev) => prev.map((q) => ({ ...q, requiredPages: pages })));
+    toast.info('Pages Updated', `Applied target of ${pages} page${pages > 1 ? 's' : ''} to all questions`);
+  };
+
   // Save Assignment to MongoDB and Open
   const handleSaveAndOpen = async () => {
     if (!title.trim()) {
@@ -195,6 +261,11 @@ export const NewAssignmentWizard: React.FC<NewAssignmentWizardProps> = ({
 
     setIsSavingToMongo(true);
     try {
+      const calculatedPages = Math.max(
+        1,
+        generatedAnswers.reduce((sum, a) => sum + (a.requiredPages || 1), 0)
+      );
+
       const newAssignmentPayload: Partial<Assignment> = {
         title: title.trim(),
         subject: subject.trim() || 'General Studies',
@@ -203,12 +274,12 @@ export const NewAssignmentWizard: React.FC<NewAssignmentWizardProps> = ({
         submissionDate: submissionDate || undefined,
         answers: generatedAnswers,
         style: selectedStyle,
-        totalPages: Math.max(1, Math.ceil(generatedAnswers.length * 0.8)),
+        totalPages: calculatedPages,
         status: 'draft',
       };
 
       const res = await api.createAssignment(newAssignmentPayload);
-      toast.success('Assignment Saved to MongoDB!', `Created with ID: ${res.assignment._id}`);
+      toast.success('Assignment Saved!', `Created successfully`);
       onAssignmentCreated(res.assignment);
     } catch (err: any) {
       toast.error('Failed to save assignment', err.message);
@@ -216,6 +287,10 @@ export const NewAssignmentWizard: React.FC<NewAssignmentWizardProps> = ({
       setIsSavingToMongo(false);
     }
   };
+
+  // Total summary calculations for step 2
+  const totalMarks = questions.reduce((sum, q) => sum + (q.marks || 0), 0);
+  const totalTargetPages = questions.reduce((sum, q) => sum + (q.requiredPages || 1), 0);
 
   return (
     <div className="max-w-4xl mx-auto py-6 px-4">
@@ -239,20 +314,19 @@ export const NewAssignmentWizard: React.FC<NewAssignmentWizardProps> = ({
               >
                 {step > s.num ? <Check className="w-4 h-4" /> : s.num}
               </div>
-              <span className="text-[11px] font-semibold text-neutral-300 mt-1.5">{s.label}</span>
+              <span
+                className={`text-[11px] mt-1.5 font-medium ${
+                  step === s.num ? 'text-indigo-400 font-semibold' : 'text-neutral-400'
+                }`}
+              >
+                {s.label}
+              </span>
             </div>
           ))}
         </div>
-        <div className="w-full max-w-md mx-auto h-1 bg-neutral-800 rounded-full mt-3 overflow-hidden">
-          <motion.div
-            initial={{ width: '0%' }}
-            animate={{ width: `${(step / 3) * 100}%` }}
-            className="h-full bg-gradient-to-r from-indigo-500 to-indigo-400"
-          />
-        </div>
       </div>
 
-      {/* STEP 1: Questions Upload & Metadata */}
+      {/* STEP 1: Metadata & Input */}
       {step === 1 && (
         <motion.div
           initial={{ opacity: 0, y: 12 }}
@@ -261,34 +335,33 @@ export const NewAssignmentWizard: React.FC<NewAssignmentWizardProps> = ({
         >
           <div className="border-b border-neutral-800 pb-4">
             <h2 className="text-xl font-bold text-white flex items-center gap-2">
-              <BookOpen className="w-5 h-5 text-indigo-400" />
+              <FileText className="w-5 h-5 text-indigo-400" />
               <span>Step 1: Assignment Details & Question Input</span>
             </h2>
             <p className="text-xs text-neutral-400 mt-1">
-              Enter your coursework metadata and paste or upload questions for Gemini AI extraction.
+              Enter your assignment topic, subject, and paste questions or upload a photo of your question paper.
             </p>
           </div>
 
-          {/* Academic Metadata Fields */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="space-y-1.5">
               <label className="text-xs font-semibold text-neutral-300">Assignment Title *</label>
               <input
                 type="text"
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
-                placeholder="E.g., Quantum Physics Assignment 2"
+                placeholder="E.g., Operating Systems Assignment 2"
                 className="w-full bg-neutral-950 border border-neutral-800 focus:border-indigo-500 rounded-xl px-3.5 py-2.5 text-sm text-neutral-100 placeholder:text-neutral-600 focus:outline-none focus:ring-1 focus:ring-indigo-500"
               />
             </div>
 
             <div className="space-y-1.5">
-              <label className="text-xs font-semibold text-neutral-300">Subject / Course Name</label>
+              <label className="text-xs font-semibold text-neutral-300">Subject / Course</label>
               <input
                 type="text"
                 value={subject}
                 onChange={(e) => setSubject(e.target.value)}
-                placeholder="E.g., Applied Physics & Nanotechnology"
+                placeholder="E.g., Computer Science & Engineering"
                 className="w-full bg-neutral-950 border border-neutral-800 focus:border-indigo-500 rounded-xl px-3.5 py-2.5 text-sm text-neutral-100 placeholder:text-neutral-600 focus:outline-none focus:ring-1 focus:ring-indigo-500"
               />
             </div>
@@ -299,7 +372,7 @@ export const NewAssignmentWizard: React.FC<NewAssignmentWizardProps> = ({
                 type="text"
                 value={studentName}
                 onChange={(e) => setStudentName(e.target.value)}
-                placeholder="E.g., Nikil Karuppusamy"
+                placeholder="E.g., Your Full Name"
                 className="w-full bg-neutral-950 border border-neutral-800 focus:border-indigo-500 rounded-xl px-3.5 py-2.5 text-sm text-neutral-100 placeholder:text-neutral-600 focus:outline-none focus:ring-1 focus:ring-indigo-500"
               />
             </div>
@@ -328,40 +401,38 @@ export const NewAssignmentWizard: React.FC<NewAssignmentWizardProps> = ({
           </div>
 
           {/* Question Input: Textarea & File Upload */}
-          <div className="space-y-4 pt-2">
-            <div className="space-y-1.5">
-              <label className="text-xs font-semibold text-neutral-300 flex items-center justify-between">
-                <span>Enter Questions or Syllabus Prompts</span>
-                <span className="text-[11px] text-neutral-500">Numbered lists or paragraphs</span>
+          <div className="space-y-3 pt-2">
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-semibold text-neutral-300">
+                Questions (Type / Paste, or Upload Image)
               </label>
-              <textarea
-                value={rawQuestionsText}
-                onChange={(e) => setRawQuestionsText(e.target.value)}
-                rows={4}
-                placeholder={`1. Explain the working principle of a Wheatstone Bridge with circuit diagram.\n2. State and prove Carnot's Theorem.\n3. Discuss the differences between TCP and UDP protocols.`}
-                className="w-full bg-neutral-950 border border-neutral-800 focus:border-indigo-500 rounded-xl p-3.5 text-sm text-neutral-100 placeholder:text-neutral-600 focus:outline-none focus:ring-1 focus:ring-indigo-500 resize-none font-mono text-xs leading-relaxed"
-              />
+              <span className="text-[11px] text-neutral-500">Supports OCR from question sheet</span>
             </div>
 
-            {/* Document / Photo Upload */}
-            <div className="space-y-1.5">
-              <label className="text-xs font-semibold text-neutral-300">
-                Or Upload Question Paper (Photo / Image)
-              </label>
+            <textarea
+              value={rawQuestionsText}
+              onChange={(e) => setRawQuestionsText(e.target.value)}
+              placeholder="Paste assignment questions here...&#10;E.g.:&#10;1. Explain Process Scheduling algorithms with Gantt chart examples.&#10;2. Differentiate between paging and segmentation with architectural diagrams."
+              rows={5}
+              className="w-full bg-neutral-950 border border-neutral-800 focus:border-indigo-500 rounded-xl p-3.5 text-sm text-neutral-100 placeholder:text-neutral-600 focus:outline-none focus:ring-1 focus:ring-indigo-500 resize-none font-mono"
+            />
+
+            {/* Image upload button */}
+            <div className="flex items-center gap-3">
               <div
                 onClick={() => fileInputRef.current?.click()}
-                className="border border-dashed border-neutral-700 hover:border-indigo-500/50 bg-neutral-950/60 p-4 rounded-xl text-center cursor-pointer transition-colors flex items-center justify-center gap-3"
+                className="flex-1 flex items-center justify-center gap-2 p-3 bg-neutral-950 border border-dashed border-neutral-800 hover:border-indigo-500 rounded-xl cursor-pointer transition-colors"
               >
                 <input
                   ref={fileInputRef}
                   type="file"
                   accept="image/*"
-                  onChange={handleFileUpload}
+                  onChange={handleFileChange}
                   className="hidden"
                 />
                 <Upload className="w-5 h-5 text-indigo-400" />
                 <span className="text-xs text-neutral-300 font-medium">
-                  {uploadedFileName ? `Loaded: ${uploadedFileName}` : 'Click to select question paper image'}
+                  {uploadedFileName ? `Loaded: ${uploadedFileName}` : 'Upload question sheet photo (JPG/PNG)'}
                 </span>
               </div>
             </div>
@@ -372,7 +443,7 @@ export const NewAssignmentWizard: React.FC<NewAssignmentWizardProps> = ({
             <button
               type="button"
               onClick={onCancel}
-              className="px-4 py-2 text-xs sm:text-sm font-medium text-neutral-400 hover:text-white rounded-xl transition-colors"
+              className="px-4 py-2 text-xs sm:text-sm font-medium text-neutral-400 hover:text-white rounded-xl transition-colors cursor-pointer"
             >
               Cancel
             </button>
@@ -385,7 +456,7 @@ export const NewAssignmentWizard: React.FC<NewAssignmentWizardProps> = ({
             >
               {isProcessingQuestions ? (
                 <>
-                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
                   <span>Processing with Gemini AI...</span>
                 </>
               ) : (
@@ -406,80 +477,167 @@ export const NewAssignmentWizard: React.FC<NewAssignmentWizardProps> = ({
           animate={{ opacity: 1, y: 0 }}
           className="bg-neutral-900 border border-neutral-800 rounded-2xl p-6 sm:p-8 shadow-xl space-y-6"
         >
-          <div className="flex items-center justify-between border-b border-neutral-800 pb-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-neutral-800 pb-4 gap-3">
             <div>
               <h2 className="text-xl font-bold text-white flex items-center gap-2">
                 <Sliders className="w-5 h-5 text-indigo-400" />
                 <span>Step 2: Assignment Planner & Question Breakdown</span>
               </h2>
               <p className="text-xs text-neutral-400 mt-1">
-                Verify each extracted question and select academic rigor level before Gemini writes the solutions.
+                Customize marks and target page counts per question. Gemini will adjust solution length and side headings to fill the requested pages.
               </p>
             </div>
             <button
               type="button"
               onClick={handleAddQuestion}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 text-xs font-semibold rounded-lg transition-colors cursor-pointer"
+              className="flex items-center gap-1.5 px-3.5 py-2 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 text-xs font-semibold rounded-xl transition-colors cursor-pointer self-start sm:self-auto"
             >
               <Plus className="w-3.5 h-3.5" />
               <span>Add Question</span>
             </button>
           </div>
 
-          {/* Academic level picker */}
-          <div className="flex items-center gap-4 bg-neutral-950 p-3 rounded-xl border border-neutral-800">
-            <span className="text-xs font-semibold text-neutral-300">Target Academic Rigor:</span>
-            <div className="flex gap-2">
-              {['High School', 'Undergraduate', 'Postgraduate'].map((level) => (
-                <button
-                  key={level}
-                  type="button"
-                  onClick={() => setAcademicLevel(level)}
-                  className={`px-3 py-1 rounded-lg text-xs font-medium transition-all ${
-                    academicLevel === level
-                      ? 'bg-indigo-600 text-white'
-                      : 'bg-neutral-900 text-neutral-400 hover:text-neutral-200'
-                  }`}
-                >
-                  {level}
-                </button>
-              ))}
+          {/* Academic Level & Batch Page Controls */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {/* Rigor Picker */}
+            <div className="bg-neutral-950 p-3.5 rounded-xl border border-neutral-800 space-y-2">
+              <span className="text-xs font-semibold text-neutral-300 block">Target Academic Rigor:</span>
+              <div className="flex gap-1.5">
+                {['High School', 'Undergraduate', 'Postgraduate'].map((level) => (
+                  <button
+                    key={level}
+                    type="button"
+                    onClick={() => setAcademicLevel(level)}
+                    className={`flex-1 py-1.5 rounded-lg text-xs font-medium transition-all cursor-pointer ${
+                      academicLevel === level
+                        ? 'bg-indigo-600 text-white shadow'
+                        : 'bg-neutral-900 text-neutral-400 hover:text-neutral-200'
+                    }`}
+                  >
+                    {level}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Quick Batch Default Pages */}
+            <div className="bg-neutral-950 p-3.5 rounded-xl border border-neutral-800 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-neutral-300">Default Target Pages:</span>
+                <span className="text-[11px] text-neutral-500">Apply to all questions</span>
+              </div>
+              <div className="flex gap-1.5">
+                {[1, 2, 3, 4].map((p) => (
+                  <button
+                    key={p}
+                    type="button"
+                    onClick={() => handleApplyDefaultPagesToAll(p)}
+                    className={`flex-1 py-1.5 rounded-lg text-xs font-medium transition-all cursor-pointer ${
+                      defaultPagesPerQuestion === p
+                        ? 'bg-purple-600 text-white shadow'
+                        : 'bg-neutral-900 text-neutral-400 hover:text-neutral-200'
+                    }`}
+                  >
+                    {p} Page{p > 1 ? 's' : ''}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
 
           {/* Questions list */}
-          <div className="space-y-3">
+          <div className="space-y-4">
             {questions.map((q, idx) => (
               <div
                 key={q.id}
-                className="p-4 bg-neutral-950 border border-neutral-800 rounded-xl flex items-start gap-3 group"
+                className="p-4 sm:p-5 bg-neutral-950 border border-neutral-800 rounded-xl space-y-3 group hover:border-neutral-700 transition-all"
               >
-                <span className="w-8 h-8 rounded-lg bg-neutral-800 text-indigo-400 flex items-center justify-center text-xs font-bold shrink-0 mt-0.5">
-                  Q{q.questionNumber || idx + 1}
-                </span>
-                <div className="flex-1 space-y-1">
-                  <input
-                    type="text"
-                    value={q.questionText}
-                    onChange={(e) => handleUpdateQuestion(q.id, e.target.value)}
-                    placeholder="Enter question wording..."
-                    className="w-full bg-transparent border-b border-transparent focus:border-neutral-700 text-sm text-neutral-100 focus:outline-none"
-                  />
-                  <div className="flex items-center gap-3 text-[11px] text-neutral-500">
-                    <span>Marks: {q.marks || 10}</span>
+                {/* Question Header & Delete */}
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <span className="w-8 h-8 rounded-lg bg-indigo-600/20 border border-indigo-500/30 text-indigo-400 flex items-center justify-center text-xs font-bold shrink-0">
+                      Q{q.questionNumber || idx + 1}
+                    </span>
+                    <span className="text-xs font-semibold text-neutral-300">
+                      Question {q.questionNumber || idx + 1}
+                    </span>
+                  </div>
+
+                  {questions.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveQuestion(q.id)}
+                      className="p-1.5 text-neutral-500 hover:text-rose-400 transition-colors cursor-pointer rounded-lg hover:bg-neutral-900"
+                      title="Remove question"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  )}
+                </div>
+
+                {/* Question Textarea */}
+                <textarea
+                  value={q.questionText}
+                  onChange={(e) => handleUpdateQuestion(q.id, e.target.value)}
+                  placeholder="Enter complete question statement..."
+                  rows={2}
+                  className="w-full bg-neutral-900 border border-neutral-800 focus:border-indigo-500 rounded-xl p-3 text-xs sm:text-sm text-neutral-100 placeholder:text-neutral-600 focus:outline-none focus:ring-1 focus:ring-indigo-500 resize-y"
+                />
+
+                {/* Controls Row: Manual Marks & Pages Per Question */}
+                <div className="flex flex-wrap items-center justify-between gap-3 pt-1 text-xs">
+                  {/* Marks Manual Input */}
+                  <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-1.5 text-neutral-400 font-medium">
+                      <Award className="w-3.5 h-3.5 text-amber-400" />
+                      <span>Marks:</span>
+                    </div>
+                    <input
+                      type="number"
+                      min={1}
+                      max={100}
+                      value={q.marks}
+                      onChange={(e) => handleUpdateMarks(q.id, parseInt(e.target.value, 10))}
+                      className="w-20 bg-neutral-900 border border-neutral-700 focus:border-indigo-500 rounded-lg px-2.5 py-1 text-xs text-white font-semibold text-center focus:outline-none"
+                    />
+                    <span className="text-[11px] text-neutral-500">pts</span>
+                  </div>
+
+                  {/* Required Pages Per Question */}
+                  <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-1.5 text-neutral-400 font-medium">
+                      <Layers className="w-3.5 h-3.5 text-purple-400" />
+                      <span>Target Pages:</span>
+                    </div>
+                    <select
+                      value={q.requiredPages}
+                      onChange={(e) => handleUpdatePages(q.id, parseInt(e.target.value, 10))}
+                      className="bg-neutral-900 border border-neutral-700 focus:border-indigo-500 rounded-lg px-3 py-1 text-xs text-white font-semibold focus:outline-none cursor-pointer"
+                    >
+                      <option value={1}>1 Page (~{pageMetrics.pageCapacities[0]?.targetWords || 380} words)</option>
+                      <option value={2}>2 Pages (~{(pageMetrics.pageCapacities[0]?.targetWords || 380) + (pageMetrics.pageCapacities[1]?.targetWords || 390)} words)</option>
+                      <option value={3}>3 Pages (~{pageMetrics.pageCapacities.slice(0, 3).reduce((s, p) => s + p.targetWords, 0)} words)</option>
+                      <option value={4}>4 Pages (~{pageMetrics.pageCapacities.slice(0, 4).reduce((s, p) => s + p.targetWords, 0)} words)</option>
+                      <option value={5}>5 Pages (~{pageMetrics.pageCapacities.slice(0, 5).reduce((s, p) => s + p.targetWords, 0)} words)</option>
+                    </select>
                   </div>
                 </div>
-                {questions.length > 1 && (
-                  <button
-                    type="button"
-                    onClick={() => handleRemoveQuestion(q.id)}
-                    className="p-1 text-neutral-500 hover:text-rose-400 transition-colors"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
-                )}
               </div>
             ))}
+          </div>
+
+          {/* Aggregate Summary Badge */}
+          <div className="p-3.5 bg-neutral-950 rounded-xl border border-neutral-800/80 flex flex-wrap items-center justify-between text-xs text-neutral-400 gap-2">
+            <span className="font-semibold text-neutral-200">
+              Assignment Summary:
+            </span>
+            <div className="flex items-center gap-4 text-neutral-300">
+              <span>{questions.length} Question{questions.length > 1 ? 's' : ''}</span>
+              <span>•</span>
+              <span className="text-amber-300 font-semibold">{totalMarks} Total Marks</span>
+              <span>•</span>
+              <span className="text-purple-300 font-semibold">~{totalTargetPages} Target Pages</span>
+            </div>
           </div>
 
           {/* Footer */}
@@ -487,7 +645,7 @@ export const NewAssignmentWizard: React.FC<NewAssignmentWizardProps> = ({
             <button
               type="button"
               onClick={() => setStep(1)}
-              className="flex items-center gap-1.5 px-4 py-2 text-xs sm:text-sm font-medium text-neutral-400 hover:text-white rounded-xl transition-colors"
+              className="flex items-center gap-1.5 px-4 py-2 text-xs sm:text-sm font-medium text-neutral-400 hover:text-white rounded-xl transition-colors cursor-pointer"
             >
               <ArrowLeft className="w-4 h-4" />
               <span>Back</span>
@@ -501,14 +659,13 @@ export const NewAssignmentWizard: React.FC<NewAssignmentWizardProps> = ({
             >
               {isGeneratingAnswers ? (
                 <>
-                  <Sparkles className="w-4 h-4 animate-spin text-amber-300" />
-                  <span>Gemini drafting handwritten answers...</span>
+                  <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                  <span>Gemini drafting solutions...</span>
                 </>
               ) : (
                 <>
                   <Sparkles className="w-4 h-4" />
                   <span>Generate Complete Answers</span>
-                  <ArrowRight className="w-4 h-4" />
                 </>
               )}
             </motion.button>
@@ -516,7 +673,7 @@ export const NewAssignmentWizard: React.FC<NewAssignmentWizardProps> = ({
         </motion.div>
       )}
 
-      {/* STEP 3: Preview Generated Answers & Save to MongoDB */}
+      {/* STEP 3: Preview Answers & Choose Handwriting */}
       {step === 3 && (
         <motion.div
           initial={{ opacity: 0, y: 12 }}
@@ -526,99 +683,109 @@ export const NewAssignmentWizard: React.FC<NewAssignmentWizardProps> = ({
           <div className="border-b border-neutral-800 pb-4">
             <h2 className="text-xl font-bold text-white flex items-center gap-2">
               <CheckCircle2 className="w-5 h-5 text-emerald-400" />
-              <span>Step 3: Solution Preview & MongoDB Persistence</span>
+              <span>Step 3: Review Solutions & Select Handwriting Profile</span>
             </h2>
             <p className="text-xs text-neutral-400 mt-1">
-              Your assignment is generated! Review the answer summary and persist it with a real ID.
+              Your assignment is ready. You can review the drafted solutions and choose your handwriting personality.
             </p>
           </div>
 
-          {/* Generated Answers Overview */}
+          {/* Quick Style Picker */}
           <div className="space-y-3">
-            <div className="flex items-center justify-between text-xs text-neutral-400">
-              <span className="font-semibold text-neutral-200">Generated Questions & Solutions ({generatedAnswers.length})</span>
-              <span>Academic Level: {academicLevel}</span>
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-semibold text-neutral-300">
+                Active Handwriting Profile:
+              </label>
+              <span className="text-xs text-indigo-400 font-medium">
+                {selectedStyle.profileName} ({selectedStyle.fontFamily})
+              </span>
             </div>
 
-            <div className="space-y-2.5 max-h-72 overflow-y-auto pr-1">
-              {generatedAnswers.map((ans, idx) => (
-                <div key={ans.id || idx} className="p-4 rounded-xl bg-neutral-950 border border-neutral-800 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-indigo-400">
-                      Q{ans.questionNumber || idx + 1}: {ans.questionText}
-                    </span>
-                    {ans.diagram && (
-                      <span className="text-[10px] bg-purple-950 text-purple-300 border border-purple-800 px-2 py-0.5 rounded-full">
-                        Diagram Attached
-                      </span>
-                    )}
-                  </div>
-                  <p className="text-xs text-neutral-300 line-clamp-3 font-mono leading-relaxed bg-neutral-900/60 p-2.5 rounded-lg border border-neutral-850">
-                    {ans.answerText}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              {[
+                { name: 'Casual Flow', font: 'Caveat', slant: 2, nuance: 'natural-ballpoint' },
+                { name: 'Neat Academic Print', font: 'Indie Flower', slant: 0, nuance: 'vibrant-gel' },
+                { name: 'Fast Cursive', font: 'Architects Daughter', slant: -2, nuance: 'dark-fountain' },
+              ].map((preset) => (
+                <div
+                  key={preset.name}
+                  onClick={() =>
+                    setSelectedStyle((prev) => ({
+                      ...prev,
+                      profileName: preset.name,
+                      fontFamily: preset.font,
+                      slant: preset.slant,
+                      blueInkNuance: preset.nuance as any,
+                    }))
+                  }
+                  className={`p-3.5 rounded-xl border cursor-pointer transition-all ${
+                    selectedStyle.fontFamily === preset.font
+                      ? 'bg-indigo-600/15 border-indigo-500 shadow-md'
+                      : 'bg-neutral-950 border-neutral-800 hover:border-neutral-700'
+                  }`}
+                >
+                  <p className="text-xs font-semibold text-white">{preset.name}</p>
+                  <p
+                    className="text-lg mt-1 text-indigo-300 truncate"
+                    style={{ fontFamily: preset.font }}
+                  >
+                    The quick brown fox jumps over...
                   </p>
                 </div>
               ))}
             </div>
           </div>
 
-          {/* Sheet & Paper Style Selector */}
-          <div className="pt-2 border-t border-neutral-800">
-            <SheetPaperSelector
-              style={selectedStyle}
-              onChange={setSelectedStyle}
-            />
-          </div>
-
-          {/* Live Paper & Handwriting Preview Card */}
-          <div className="space-y-2 pt-2">
-            <label className="text-xs font-semibold text-neutral-300 flex items-center justify-between">
-              <span className="flex items-center gap-2">
-                <PenTool className="w-3.5 h-3.5 text-indigo-400" />
-                <span>Live Sample Page Rendering ({selectedStyle.fontFamily} • {selectedStyle.sheetStyle || 'Single Rule'})</span>
-              </span>
-              <span className="text-[11px] text-neutral-400 font-mono">
-                Real-time baseline & glyph preview
-              </span>
-            </label>
-
-            <div className="relative rounded-xl border border-neutral-700 h-36 overflow-hidden shadow-inner p-4">
-              <SheetPaperBackground
-                sheetStyle={selectedStyle.sheetStyle || 'single-rule'}
-                lineSpacing={selectedStyle.lineSpacing || 32}
-                width={800}
-                height={200}
-                marginTop={30}
-                marginLeft={56}
-              />
-              <div className="relative z-10 pl-14 pt-1 space-y-1">
-                <div className="font-bold">
-                  <RealisticHandwrittenText
-                    text={`Q1. ${generatedAnswers[0]?.questionText || 'Discuss fundamental principles.'}`}
-                    style={selectedStyle}
-                    lineIndex={0}
-                    className="font-bold"
-                  />
-                </div>
-                <div>
-                  <RealisticHandwrittenText
-                    text={`Ans: ${generatedAnswers[0]?.answerText?.slice(0, 140) || 'Comprehensive academic solution with natural penmanship.'}...`}
-                    style={selectedStyle}
-                    lineIndex={1}
-                  />
-                </div>
-              </div>
+          {/* Generated Answers List */}
+          <div className="space-y-3 pt-2">
+            <h3 className="text-xs font-semibold text-neutral-400 uppercase tracking-wider">
+              Drafted Assignment Solutions ({generatedAnswers.length})
+            </h3>
+            <div className="max-h-72 overflow-y-auto space-y-3 pr-2 custom-scrollbar">
+              {generatedAnswers.map((ans, i) => {
+                const sim = simulateQuestionPageLayout(
+                  ans.questionText,
+                  ans.answerText,
+                  Boolean(ans.diagram),
+                  ans.requiredPages || 1,
+                  selectedStyle
+                );
+                return (
+                  <div
+                    key={ans.id || i}
+                    className="p-4 bg-neutral-950 border border-neutral-800 rounded-xl space-y-2 text-xs"
+                  >
+                    <div className="flex items-center justify-between text-neutral-300">
+                      <span className="font-bold text-indigo-400">
+                        Q{ans.questionNumber || i + 1}: {ans.questionText}
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <span className="px-2 py-0.5 rounded bg-neutral-900 border border-neutral-800 text-amber-300 text-[11px] font-semibold">
+                          {ans.marks || 10} Marks
+                        </span>
+                        <span className="px-2 py-0.5 rounded bg-purple-950/60 border border-purple-800/80 text-purple-300 text-[11px] font-semibold">
+                          Target: {ans.requiredPages || 1}p • Rendered: {sim.actualPages}p ({sim.lastPageFillPercentage}% fill)
+                        </span>
+                      </div>
+                    </div>
+                    <p className="text-neutral-400 line-clamp-3 leading-relaxed font-mono whitespace-pre-line">
+                      {ans.answerText}
+                    </p>
+                  </div>
+                );
+              })}
             </div>
           </div>
 
-          {/* Footer Save to MongoDB & Open */}
+          {/* Action Footer */}
           <div className="flex items-center justify-between pt-4 border-t border-neutral-800">
             <button
               type="button"
               onClick={() => setStep(2)}
-              className="flex items-center gap-1.5 px-4 py-2 text-xs sm:text-sm font-medium text-neutral-400 hover:text-white rounded-xl transition-colors"
+              className="flex items-center gap-1.5 px-4 py-2 text-xs sm:text-sm font-medium text-neutral-400 hover:text-white rounded-xl transition-colors cursor-pointer"
             >
               <ArrowLeft className="w-4 h-4" />
-              <span>Back</span>
+              <span>Adjust Planner</span>
             </button>
             <motion.button
               whileHover={{ scale: 1.02 }}
@@ -629,14 +796,13 @@ export const NewAssignmentWizard: React.FC<NewAssignmentWizardProps> = ({
             >
               {isSavingToMongo ? (
                 <>
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                  <span>Saving to MongoDB Database...</span>
+                  <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                  <span>Saving Assignment...</span>
                 </>
               ) : (
                 <>
-                  <Save className="w-4 h-4" />
-                  <span>Save Assignment to MongoDB & Open</span>
-                  <ArrowRight className="w-4 h-4" />
+                  <Check className="w-4 h-4" />
+                  <span>Save & Open in True A4 Studio</span>
                 </>
               )}
             </motion.button>

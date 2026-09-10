@@ -16,6 +16,7 @@ import {
   X,
   RotateCcw,
   Layout,
+  Award,
 } from 'lucide-react';
 import { Assignment, HandwritingStyle, SheetStyle, BlueInkNuance, HeaderSettings, PageContent } from '../types';
 import { exportAssignmentToPdf } from '../lib/pdfExport';
@@ -26,6 +27,7 @@ import { SheetPaperSelector } from './SheetPaperSelector';
 import { PageHeaderSettingsPanel } from './PageHeaderSettingsPanel';
 import { SHEET_TEMPLATES } from '../lib/handwritingEngine';
 import { getDefaultHeaderSettings, calculateHeaderDimensions } from '../lib/headerEngine';
+import { paginateAssignmentAnswers } from '../lib/pageCapacityEngine';
 
 interface TrueA4PreviewProps {
   assignment: Assignment;
@@ -34,6 +36,7 @@ interface TrueA4PreviewProps {
   onOpenSettings?: () => void;
   onUpdateStyle?: (updatedStyle: HandwritingStyle) => Promise<void> | void;
   onUpdateHeaderSettings?: (updatedHeader: HeaderSettings) => Promise<void> | void;
+  onUpdateShowMarks?: (showMarks: boolean) => Promise<void> | void;
 }
 
 export const TrueA4Preview: React.FC<TrueA4PreviewProps> = ({
@@ -43,6 +46,7 @@ export const TrueA4Preview: React.FC<TrueA4PreviewProps> = ({
   onOpenSettings,
   onUpdateStyle,
   onUpdateHeaderSettings,
+  onUpdateShowMarks,
 }) => {
   const toast = useToast();
   const [internalPage, setInternalPage] = useState(1);
@@ -52,6 +56,23 @@ export const TrueA4Preview: React.FC<TrueA4PreviewProps> = ({
   const [exportProgress, setExportProgress] = useState<{ current: number; total: number; stage: string } | null>(null);
   const [showStylePanel, setShowStylePanel] = useState(false);
   const [showHeaderPanel, setShowHeaderPanel] = useState(false);
+  const [showMarks, setShowMarks] = useState<boolean>(Boolean(assignment.showMarks));
+
+  // Sync showMarks if assignment changes
+  useEffect(() => {
+    if (assignment.showMarks !== undefined) {
+      setShowMarks(Boolean(assignment.showMarks));
+    }
+  }, [assignment.showMarks]);
+
+  const handleToggleShowMarks = () => {
+    const nextVal = !showMarks;
+    setShowMarks(nextVal);
+    if (onUpdateShowMarks) {
+      onUpdateShowMarks(nextVal);
+    }
+    toast.info(nextVal ? 'Marks Display Enabled' : 'Marks Display Hidden', nextVal ? 'Question marks will be rendered on the assignment' : 'Marks are now completely hidden from the assignment output');
+  };
 
   // Progressive rendering state simulation for preview flow
   const [renderState, setRenderState] = useState<'idle' | 'preparing' | 'rendering' | 'applying' | 'ready'>('idle');
@@ -144,108 +165,15 @@ export const TrueA4Preview: React.FC<TrueA4PreviewProps> = ({
 
   // -------------------------------------------------------------
   // True A4 Intelligent Pagination Engine
-  // Adapts dynamically to header height so space is never wasted
+  // Powered by real handwriting capacity geometry & header metrics
   // -------------------------------------------------------------
   const pages: PageContent[] = useMemo(() => {
-    const effectiveSpacing = currentStyle.lineSpacing || 32;
-    // Available vertical pixel space in A4 sheet
-    const availableHeight = 1040 - (headerDims.isHeaderRendered ? headerDims.marginTopPx : 20);
-    const LINES_PER_PAGE = Math.max(18, Math.min(34, Math.floor(availableHeight / effectiveSpacing)));
-    const computedPages: PageContent[] = [];
-    let currentPageItems: PageContent['items'] = [];
-    let currentLineCount = 0;
-
-    const startNewPage = () => {
-      if (currentPageItems.length > 0) {
-        computedPages.push({
-          pageNumber: computedPages.length + 1,
-          items: currentPageItems,
-        });
-      }
-      currentPageItems = [];
-      currentLineCount = 0;
-    };
-
-    if (!assignment.answers || assignment.answers.length === 0) {
-      return [
-        {
-          pageNumber: 1,
-          items: [
-            {
-              type: 'paragraph',
-              text: 'No answers written yet. Open the Assignment Editor to add questions or generate answers with Gemini AI.',
-            },
-          ],
-        },
-      ];
-    }
-
-    assignment.answers.forEach((ans, qIndex) => {
-      // If user toggled manual page break
-      if (ans.pageBreakBefore && currentPageItems.length > 0) {
-        startNewPage();
-      }
-
-      // Estimate question line cost
-      const qLines = Math.max(1, Math.ceil((ans.questionText?.length || 20) / 60));
-      if (currentLineCount + qLines + 2 > LINES_PER_PAGE && currentPageItems.length > 0) {
-        startNewPage();
-      }
-
-      currentPageItems.push({
-        type: 'question',
-        qNum: ans.questionNumber || qIndex + 1,
-        text: ans.questionText,
-      });
-      currentLineCount += qLines + 1;
-
-      // Split answer paragraphs
-      const paragraphs = (ans.answerText || '').split('\n').filter((p) => p.trim().length > 0);
-
-      paragraphs.forEach((para) => {
-        const pLines = Math.max(1, Math.ceil(para.length / 65));
-        if (currentLineCount + pLines > LINES_PER_PAGE && currentPageItems.length > 0) {
-          startNewPage();
-        }
-
-        currentPageItems.push({
-          type: 'paragraph',
-          text: para,
-        });
-        currentLineCount += pLines;
-      });
-
-      // Add diagram if attached (takes ~7 lines)
-      if (ans.diagram) {
-        const diagramLineCost = 7;
-        if (currentLineCount + diagramLineCost > LINES_PER_PAGE && currentPageItems.length > 0) {
-          startNewPage();
-        }
-
-        currentPageItems.push({
-          type: 'diagram',
-          diagram: ans.diagram,
-        });
-        currentLineCount += diagramLineCost;
-      }
-    });
-
-    if (currentPageItems.length > 0) {
-      computedPages.push({
-        pageNumber: computedPages.length + 1,
-        items: currentPageItems,
-      });
-    }
-
-    return computedPages.length > 0
-      ? computedPages
-      : [
-          {
-            pageNumber: 1,
-            items: [{ type: 'paragraph', text: 'Preparing assignment...' }],
-          },
-        ];
-  }, [assignment.answers, currentStyle.lineSpacing]);
+    return paginateAssignmentAnswers(
+      assignment.answers || [],
+      currentStyle,
+      currentHeaderSettings
+    );
+  }, [assignment.answers, currentStyle, currentHeaderSettings]);
 
   const totalPages = pages.length;
 

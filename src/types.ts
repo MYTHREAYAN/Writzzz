@@ -6,8 +6,22 @@ export interface User {
   createdAt: string;
 }
 
-export type HandwritingFont = 'Caveat' | 'Kalam' | 'Homemade Apple' | 'Cedarville Cursive';
-export type InkType = 'ballpoint-blue' | 'ballpoint-black' | 'gel-blue' | 'gel-black';
+export type HandwritingFont =
+  | 'Caveat'
+  | 'Kalam'
+  | 'Homemade Apple'
+  | 'Cedarville Cursive'
+  | 'Indie Flower'
+  | 'Architects Daughter'
+  | 'Shadows Into Light';
+export type InkType =
+  | 'ballpoint-blue'
+  | 'ballpoint-black'
+  | 'gel-blue'
+  | 'gel-black'
+  | 'fountain-blue'
+  | 'royal-blue'
+  | 'dark-blue';
 export type PaperType = 'ruled' | 'blank' | 'graph';
 
 export type SheetStyle =
@@ -29,7 +43,9 @@ export type BlueInkNuance =
   | 'medium-blue'
   | 'dark-blue'
   | 'light-blue'
-  | 'blue-gray';
+  | 'blue-gray'
+  | 'fountain-pen'
+  | 'vibrant-gel';
 
 export interface HandwritingStyle {
   _id?: string;
@@ -79,9 +95,18 @@ export interface AnswerItem {
   questionNumber: string | number;
   questionText: string;
   marks?: number;
+  requiredPages?: number;
   answerText: string;
   diagram?: DiagramItem;
   pageBreakBefore?: boolean;
+}
+
+export interface QuestionInput {
+  id?: string;
+  questionNumber: string | number;
+  questionText: string;
+  marks?: number;
+  requiredPages: number;
 }
 
 export type HeaderStyle = 'minimal' | 'classic' | 'academic' | 'notebook' | 'custom' | 'none';
@@ -153,6 +178,7 @@ export interface Assignment {
   style: HandwritingStyle;
   headerSettings?: HeaderSettings;
   totalPages?: number;
+  showMarks?: boolean;
   status: 'draft' | 'completed';
   createdAt: string;
   updatedAt: string;
@@ -174,11 +200,13 @@ export interface AuthResponse {
 }
 
 export interface PageItem {
-  type: 'question' | 'paragraph' | 'diagram';
+  type: 'question' | 'paragraph' | 'heading' | 'diagram';
   qNum?: string | number;
   text?: string;
   diagram?: any;
   marks?: number;
+  requiredPages?: number;
+  isHeading?: boolean;
 }
 
 export interface PageContent {

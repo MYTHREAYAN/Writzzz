@@ -189,6 +189,16 @@ export const BLUE_INK_PALETTES: Record<BlueInkNuance, { base: string; shades: st
     shades: ['#334155', '#2c384a', '#3c4d63', '#252f3f', '#44566f', '#2f3c4e'],
     rgb: [51, 65, 85],
   },
+  'fountain-pen': {
+    base: '#1e3a8a',
+    shades: ['#1e3a8a', '#172554', '#1e40af', '#1d4ed8', '#1a367c', '#204394'],
+    rgb: [30, 58, 138],
+  },
+  'vibrant-gel': {
+    base: '#1d4ed8',
+    shades: ['#1d4ed8', '#2563eb', '#1e40af', '#2a5ee8', '#1b44c2', '#2255dc'],
+    rgb: [29, 78, 216],
+  },
 };
 
 export const BLACK_INK_PALETTES = {
@@ -229,7 +239,8 @@ export function computeGlyphTransform(
   charIndex: number,
   wordIndex: number,
   lineIndex: number,
-  style: HandwritingStyle
+  style: HandwritingStyle,
+  forceBlackInk: boolean = false
 ): GlyphTransform {
   // Compute deterministic seed from indices & char code
   const charCode = char.charCodeAt(0);
@@ -243,13 +254,18 @@ export function computeGlyphTransform(
 
   // 1. Ink Color Selection
   let color = '#1e3a8a';
-  if (style.inkType === 'ballpoint-black' || style.inkType === 'gel-black') {
-    const pal = BLACK_INK_PALETTES[style.inkType];
+  if (forceBlackInk || style.inkType === 'ballpoint-black' || style.inkType === 'gel-black') {
+    const pal = BLACK_INK_PALETTES[style.inkType === 'gel-black' ? 'gel-black' : 'ballpoint-black'];
     const shadeIdx = Math.floor(r1 * pal.shades.length);
     color = pal.shades[shadeIdx];
   } else {
-    // Blue ink nuance
-    const nuance = style.blueInkNuance || 'natural-ballpoint';
+    // Blue ink nuance or custom ink selection
+    let nuance = style.blueInkNuance || 'natural-ballpoint';
+    if (style.inkType === 'fountain-blue') nuance = 'fountain-pen';
+    else if (style.inkType === 'royal-blue') nuance = 'royal-blue';
+    else if (style.inkType === 'dark-blue') nuance = 'dark-blue';
+    else if (style.inkType === 'gel-blue') nuance = 'vibrant-gel';
+
     const pal = BLUE_INK_PALETTES[nuance] || BLUE_INK_PALETTES['natural-ballpoint'];
     const shadeIdx = Math.floor(r1 * pal.shades.length);
     color = pal.shades[shadeIdx];
@@ -324,6 +340,12 @@ export function getFontFamilyClass(family?: string): string {
       return 'font-homemade';
     case 'Cedarville Cursive':
       return 'font-cursive';
+    case 'Indie Flower':
+      return 'font-indie';
+    case 'Architects Daughter':
+      return 'font-architects';
+    case 'Shadows Into Light':
+      return 'font-shadows';
     default:
       return 'font-caveat';
   }
@@ -339,6 +361,12 @@ export function getFontFamilyCss(family?: string): string {
       return "'Homemade Apple', cursive, sans-serif";
     case 'Cedarville Cursive':
       return "'Cedarville Cursive', cursive, sans-serif";
+    case 'Indie Flower':
+      return "'Indie Flower', cursive, sans-serif";
+    case 'Architects Daughter':
+      return "'Architects Daughter', cursive, sans-serif";
+    case 'Shadows Into Light':
+      return "'Shadows Into Light', cursive, sans-serif";
     default:
       return "'Caveat', cursive, sans-serif";
   }
@@ -348,17 +376,33 @@ export function getInkClass(inkType?: InkType, blueInkNuance?: BlueInkNuance): s
   if (inkType === 'ballpoint-black' || inkType === 'gel-black') {
     return 'text-neutral-900';
   }
+  if (inkType === 'royal-blue') {
+    return 'text-[#1d4ed8]';
+  }
+  if (inkType === 'dark-blue') {
+    return 'text-[#1e40af]';
+  }
+  if (inkType === 'fountain-blue') {
+    return 'text-[#1e3a8a]';
+  }
+  if (inkType === 'gel-blue') {
+    return 'text-[#2563eb]';
+  }
   switch (blueInkNuance) {
     case 'deep-navy':
-      return 'text-[#1e293b]';
+      return 'text-[#172554]';
     case 'royal-blue':
       return 'text-[#1d4ed8]';
     case 'dark-blue':
-      return 'text-[#172554]';
+      return 'text-[#1e40af]';
     case 'light-blue':
-      return 'text-[#2563eb]';
+      return 'text-[#3b82f6]';
     case 'blue-gray':
       return 'text-[#334155]';
+    case 'fountain-pen':
+      return 'text-[#1e3a8a]';
+    case 'vibrant-gel':
+      return 'text-[#1d4ed8]';
     case 'natural-ballpoint':
     default:
       return 'text-[#1e3a8a]';

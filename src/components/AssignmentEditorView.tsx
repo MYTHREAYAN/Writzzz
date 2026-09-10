@@ -16,7 +16,9 @@ import {
   FileCheck,
   Calendar,
   User,
-  Hash
+  Hash,
+  Award,
+  Layers
 } from 'lucide-react';
 import { Assignment, AnswerItem, DiagramItem, HandwritingStyle } from '../types';
 import { api } from '../lib/api';
@@ -24,6 +26,11 @@ import { TrueA4Preview } from './TrueA4Preview';
 import { DiagramStudioModal } from './DiagramStudioModal';
 import { HandwritingUploadModal } from './HandwritingUploadModal';
 import { useToast } from './Toast';
+import {
+  calculatePageCapacity,
+  simulateQuestionPageLayout,
+  expandAnswerToTargetPages,
+} from '../lib/pageCapacityEngine';
 
 interface AssignmentEditorViewProps {
   assignment: Assignment;
@@ -64,13 +71,59 @@ export const AssignmentEditorView: React.FC<AssignmentEditorViewProps> = ({
     setAssignment((prev) => ({ ...prev, answers: updatedAnswers }));
   };
 
+  const handleUpdateMarks = (index: number, marksVal: number) => {
+    const validMarks = isNaN(marksVal) || marksVal < 1 ? 1 : Math.min(100, Math.floor(marksVal));
+    const updatedAnswers = [...assignment.answers];
+    updatedAnswers[index] = {
+      ...updatedAnswers[index],
+      marks: validMarks,
+    };
+    setAssignment((prev) => ({ ...prev, answers: updatedAnswers }));
+  };
+
+  const handleUpdatePages = (index: number, pagesVal: number) => {
+    const validPages = isNaN(pagesVal) || pagesVal < 1 ? 1 : Math.min(10, Math.floor(pagesVal));
+    const updatedAnswers = [...assignment.answers];
+    updatedAnswers[index] = {
+      ...updatedAnswers[index],
+      requiredPages: validPages,
+    };
+    setAssignment((prev) => ({ ...prev, answers: updatedAnswers }));
+  };
+
+  const handleAutoFillPages = (index: number) => {
+    const targetAnswer = assignment.answers[index];
+    if (!targetAnswer) return;
+
+    const reqPages = targetAnswer.requiredPages || 1;
+    const expanded = expandAnswerToTargetPages(
+      targetAnswer.questionText,
+      targetAnswer.answerText,
+      targetAnswer.marks || 10,
+      reqPages,
+      assignment.subject,
+      'Undergraduate',
+      assignment.style,
+      assignment.headerSettings
+    );
+
+    const updatedAnswers = [...assignment.answers];
+    updatedAnswers[index] = {
+      ...updatedAnswers[index],
+      answerText: expanded,
+    };
+    setAssignment((prev) => ({ ...prev, answers: updatedAnswers }));
+    toast.success('Page Capacity Filled', `Q${targetAnswer.questionNumber || index + 1} expanded to fill ${reqPages} handwritten page${reqPages > 1 ? 's' : ''}`);
+  };
+
   const handleAddQuestion = () => {
     const newAnswer: AnswerItem = {
       id: Math.random().toString(36).substring(2, 9),
       questionNumber: assignment.answers.length + 1,
       questionText: 'New Question',
-      marks: 5,
-      answerText: 'Write or generate the answer to this question here...',
+      marks: 10,
+      requiredPages: 1,
+      answerText: '### 1. Overview\nWrite or generate the answer to this question here...',
     };
     setAssignment((prev) => ({
       ...prev,
@@ -312,6 +365,81 @@ export const AssignmentEditorView: React.FC<AssignmentEditorViewProps> = ({
                     </button>
                   </div>
                 </div>
+
+                {/* Marks & Target Pages Row */}
+                {(() => {
+                  const reqP = ans.requiredPages || 1;
+                  const sim = simulateQuestionPageLayout(
+                    ans.questionText,
+                    ans.answerText,
+                    Boolean(ans.diagram),
+                    reqP,
+                    assignment.style,
+                    assignment.headerSettings,
+                    idx === 0
+                  );
+                  const isUnderfilled = sim.actualPages < reqP || (sim.actualPages === reqP && sim.lastPageFillPercentage < 82);
+
+                  return (
+                    <div className="flex flex-wrap items-center justify-between gap-3 py-2 px-3 bg-neutral-950/60 rounded-xl border border-neutral-800/80 text-xs">
+                      <div className="flex flex-wrap items-center gap-4">
+                        <div className="flex items-center gap-1.5">
+                          <Award className="w-3.5 h-3.5 text-amber-400" />
+                          <span className="text-neutral-400 font-medium">Marks:</span>
+                          <input
+                            type="number"
+                            min={1}
+                            max={100}
+                            value={ans.marks ?? 10}
+                            onChange={(e) => handleUpdateMarks(idx, parseInt(e.target.value, 10))}
+                            className="w-16 bg-neutral-900 border border-neutral-800 focus:border-indigo-500 rounded-lg px-2 py-0.5 text-xs text-white text-center focus:outline-none"
+                          />
+                          <span className="text-neutral-500 text-[11px]">pts</span>
+                        </div>
+
+                        <div className="flex items-center gap-1.5">
+                          <Layers className="w-3.5 h-3.5 text-purple-400" />
+                          <span className="text-neutral-400 font-medium">Target Pages:</span>
+                          <select
+                            value={ans.requiredPages ?? 1}
+                            onChange={(e) => handleUpdatePages(idx, parseInt(e.target.value, 10))}
+                            className="bg-neutral-900 border border-neutral-800 focus:border-indigo-500 rounded-lg px-2.5 py-0.5 text-xs text-white focus:outline-none cursor-pointer"
+                          >
+                            <option value={1}>1 Page</option>
+                            <option value={2}>2 Pages</option>
+                            <option value={3}>3 Pages</option>
+                            <option value={4}>4 Pages</option>
+                            <option value={5}>5 Pages</option>
+                          </select>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <span
+                          className={`px-2.5 py-1 rounded-lg border text-[11px] font-medium flex items-center gap-1.5 ${
+                            isUnderfilled
+                              ? 'bg-amber-950/40 border-amber-800/50 text-amber-300'
+                              : 'bg-emerald-950/40 border-emerald-800/50 text-emerald-300'
+                          }`}
+                        >
+                          <span>Rendered: {sim.actualPages} / {reqP} Page{reqP > 1 ? 's' : ''} ({sim.lastPageFillPercentage}% fill)</span>
+                        </span>
+
+                        {isUnderfilled && (
+                          <button
+                            type="button"
+                            onClick={() => handleAutoFillPages(idx)}
+                            className="px-2.5 py-1 rounded-lg bg-indigo-600/30 hover:bg-indigo-600/50 border border-indigo-500/40 text-indigo-200 text-[11px] font-semibold transition-all cursor-pointer flex items-center gap-1"
+                            title="Expand academic content to physically fill target pages"
+                          >
+                            <Sparkles className="w-3 h-3 text-indigo-400" />
+                            <span>Auto-Fill Page</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })()}
 
                 {/* Answer Text Area */}
                 <div className="space-y-1">

@@ -63,6 +63,20 @@ export const api = {
     return res;
   },
 
+  async forgotPassword(email: string): Promise<{ success: boolean; message: string; resetToken?: string; resetUrl?: string }> {
+    return fetchWithAuth(`${API_BASE}/auth/forgot-password`, {
+      method: 'POST',
+      body: JSON.stringify({ email }),
+    });
+  },
+
+  async resetPassword(token: string, newPassword: string): Promise<{ success: boolean; message: string }> {
+    return fetchWithAuth(`${API_BASE}/auth/reset-password`, {
+      method: 'POST',
+      body: JSON.stringify({ token, newPassword }),
+    });
+  },
+
   async getMe(): Promise<{ user: User }> {
     return fetchWithAuth<{ user: User }>(`${API_BASE}/auth/me`);
   },
@@ -120,22 +134,33 @@ export const api = {
   },
 
   // AI Assistant
-  async processQuestions(text?: string, imageBase64?: string, mimeType?: string): Promise<{
+  async processQuestions(
+    text?: string,
+    imageBase64?: string,
+    mimeType?: string,
+    subject?: string
+  ): Promise<{
     title: string;
     subject: string;
     estimatedPages?: number;
-    questions: Array<{ questionNumber: string | number; questionText: string; marks?: number }>;
+    questions: Array<{ questionNumber: string | number; questionText: string; marks?: number; requiredPages?: number }>;
   }> {
     return fetchWithAuth(`${API_BASE}/ai/process-questions`, {
       method: 'POST',
-      body: JSON.stringify({ text, imageBase64, mimeType }),
+      body: JSON.stringify({ text, imageBase64, mimeType, subject }),
     });
   },
 
-  async generateAnswers(questions: any[], subject?: string, academicLevel?: string): Promise<{ answers: any[] }> {
+  async generateAnswers(
+    questions: any[],
+    subject?: string,
+    academicLevel?: string,
+    style?: any,
+    headerSettings?: any
+  ): Promise<{ answers: any[] }> {
     return fetchWithAuth(`${API_BASE}/ai/generate-answers`, {
       method: 'POST',
-      body: JSON.stringify({ questions, subject, academicLevel }),
+      body: JSON.stringify({ questions, subject, academicLevel, style, headerSettings }),
     });
   },
 

@@ -235,7 +235,7 @@ export const PageHeaderSettingsPanel: React.FC<PageHeaderSettingsPanelProps> = (
                     type="text"
                     value={headerSettings.fields.studentName?.value || ''}
                     onChange={(e) => updateField('studentName', { value: e.target.value })}
-                    placeholder="e.g. Jane Doe"
+                    placeholder="e.g. Student Name"
                     disabled={!headerSettings.fields.studentName?.enabled}
                     className="w-full bg-transparent text-xs text-white placeholder-neutral-600 border-none outline-none disabled:opacity-40"
                   />

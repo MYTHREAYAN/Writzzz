@@ -44,6 +44,9 @@ export async function ensureHandwritingFontsLoaded(): Promise<void> {
       'bold 18px Kalam',
       '18px "Homemade Apple"',
       '18px "Cedarville Cursive"',
+      '18px "Indie Flower"',
+      '18px "Architects Daughter"',
+      '18px "Shadows Into Light"',
       '18px "Plus Jakarta Sans"',
       'bold 18px "Plus Jakarta Sans"',
       '18px Outfit',
@@ -388,7 +391,8 @@ function drawHandwrittenTextLine(
   baselineY: number,
   style: HandwritingStyle,
   lineIndex: number,
-  isBold: boolean = false
+  isBold: boolean = false,
+  forceBlackInk: boolean = false
 ): void {
   const fontFamily = style.fontFamily || 'Caveat';
   const fontSize = (style.fontSize || 18) + (isBold ? 1 : 0);
@@ -411,7 +415,8 @@ function drawHandwrittenTextLine(
         charGlobalIndex++,
         w,
         lineIndex,
-        style
+        style,
+        forceBlackInk
       );
 
       ctx.save();
@@ -509,7 +514,8 @@ export async function renderFinalAssignmentPage(
   headerSettings: HeaderSettings,
   totalPages: number,
   isFirstPage: boolean = true,
-  scale: number = DEFAULT_SCALE
+  scale: number = DEFAULT_SCALE,
+  showMarks: boolean = false
 ): Promise<string> {
   await ensureHandwritingFontsLoaded();
 
@@ -560,7 +566,7 @@ export async function renderFinalAssignmentPage(
     if (item.type === 'question') {
       const qNumText = item.qNum ? `Q${item.qNum}.` : 'Q.';
 
-      // Draw question number in the margin gutter
+      // Draw question number in the margin gutter in Black Ink
       const marginLabelX = Math.max(12, marginLineX - 44);
       drawHandwrittenTextLine(
         ctx,
@@ -569,13 +575,20 @@ export async function renderFinalAssignmentPage(
         currentY,
         style,
         lineCounter++,
-        true
+        true,
+        true // forceBlackInk
       );
 
-      // Wrap and draw question text
+      // Question statement: only append marks if explicitly enabled by user via showMarks
+      let displayQuestionText = item.text || '';
+      if (showMarks && item.marks !== undefined && item.marks !== null) {
+        displayQuestionText += `  [${item.marks} Marks]`;
+      }
+
+      // Wrap and draw question text in Black Ink
       const qLines = wrapHandwrittenText(
         ctx,
-        item.text || '',
+        displayQuestionText,
         maxWidth,
         fontFamily,
         fontSize + 1,
@@ -591,12 +604,55 @@ export async function renderFinalAssignmentPage(
           currentY,
           style,
           lineCounter++,
-          true
+          true,
+          true // forceBlackInk
         );
         currentY += lineSpacing;
       }
 
       currentY += 6; // Small gap after question
+    } else if (item.type === 'heading') {
+      // Side headings in authentic Black ink, bold, distinct
+      const hLines = wrapHandwrittenText(
+        ctx,
+        item.text || '',
+        maxWidth,
+        fontFamily,
+        fontSize + 1.5,
+        true
+      );
+
+      currentY += 4; // Spacing before heading
+
+      for (const hLine of hLines) {
+        if (currentY > A4_HEIGHT - 60) break;
+        drawHandwrittenTextLine(
+          ctx,
+          hLine,
+          contentX,
+          currentY,
+          style,
+          lineCounter++,
+          true,
+          true // forceBlackInk
+        );
+
+        // Draw natural subtle underline under side heading
+        ctx.save();
+        ctx.font = `bold ${fontSize + 1.5}px "${fontFamily}", cursive, sans-serif`;
+        const textW = ctx.measureText(hLine).width;
+        ctx.strokeStyle = '#27272a';
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.moveTo(contentX, currentY + 3);
+        ctx.lineTo(contentX + Math.min(textW, maxWidth), currentY + 3);
+        ctx.stroke();
+        ctx.restore();
+
+        currentY += lineSpacing;
+      }
+
+      currentY += 4; // Spacing after heading before paragraphs
     } else if (item.type === 'paragraph') {
       const pLines = wrapHandwrittenText(
         ctx,
@@ -616,7 +672,8 @@ export async function renderFinalAssignmentPage(
           currentY,
           style,
           lineCounter++,
-          false
+          false,
+          false // blue / regular ink
         );
         currentY += lineSpacing;
       }
@@ -722,7 +779,8 @@ export async function renderAllAssignmentPages(
   pages: PageContent[],
   style: HandwritingStyle,
   headerSettings: HeaderSettings,
-  onProgress?: RenderProgressCallback
+  onProgress?: RenderProgressCallback,
+  showMarks: boolean = false
 ): Promise<string[]> {
   await ensureHandwritingFontsLoaded();
 
@@ -741,7 +799,9 @@ export async function renderAllAssignmentPages(
       style,
       headerSettings,
       totalPages,
-      i === 0
+      i === 0,
+      DEFAULT_SCALE,
+      showMarks
     );
 
     renders.push(pageDataUrl);

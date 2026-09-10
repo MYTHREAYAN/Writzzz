@@ -79,7 +79,8 @@ export async function exportAssignmentToPdf(
           totalPages: renderProg.totalPages,
           status: 'rendering',
         });
-      }
+      },
+      Boolean(assignment.showMarks)
     );
   }
 

@@ -7,6 +7,7 @@ interface RealisticHandwrittenTextProps {
   style: HandwritingStyle;
   lineIndex?: number;
   className?: string;
+  forceBlackInk?: boolean;
 }
 
 export const RealisticHandwrittenText: React.FC<RealisticHandwrittenTextProps> = ({
@@ -14,6 +15,7 @@ export const RealisticHandwrittenText: React.FC<RealisticHandwrittenTextProps> =
   style,
   lineIndex = 0,
   className = '',
+  forceBlackInk = false,
 }) => {
   const getFontFamilyClass = (f?: string) => {
     switch (f) {
@@ -25,6 +27,12 @@ export const RealisticHandwrittenText: React.FC<RealisticHandwrittenTextProps> =
         return 'font-homemade';
       case 'Cedarville Cursive':
         return 'font-cursive';
+      case 'Indie Flower':
+        return 'font-indie';
+      case 'Architects Daughter':
+        return 'font-architects';
+      case 'Shadows Into Light':
+        return 'font-shadows';
       default:
         return 'font-caveat';
     }
@@ -66,7 +74,8 @@ export const RealisticHandwrittenText: React.FC<RealisticHandwrittenTextProps> =
                 globalCharCount++,
                 wordIdx,
                 lineIndex,
-                style
+                style,
+                forceBlackInk
               );
 
               return (
