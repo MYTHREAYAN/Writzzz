@@ -1,0 +1,6 @@
+{
+  "name": "Writzz",
+  "description": "AI-Powered Personalized Handwritten Assignment Platform. Your Ideas. Your Handwriting.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
