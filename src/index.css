@@ -1,0 +1,99 @@
+@import "tailwindcss";
+
+/* Global font utility classes available across all contexts and canvas parsers */
+.font-caveat {
+  font-family: 'Caveat', cursive, sans-serif !important;
+}
+.font-kalam {
+  font-family: 'Kalam', cursive, sans-serif !important;
+}
+.font-homemade {
+  font-family: 'Homemade Apple', cursive, sans-serif !important;
+}
+.font-cursive {
+  font-family: 'Cedarville Cursive', cursive, sans-serif !important;
+}
+.font-display {
+  font-family: 'Outfit', sans-serif !important;
+}
+.font-body {
+  font-family: 'Plus Jakarta Sans', sans-serif !important;
+}
+
+@layer utilities {
+  .font-caveat {
+    font-family: 'Caveat', cursive, sans-serif;
+  }
+  .font-kalam {
+    font-family: 'Kalam', cursive, sans-serif;
+  }
+  .font-homemade {
+    font-family: 'Homemade Apple', cursive, sans-serif;
+  }
+  .font-cursive {
+    font-family: 'Cedarville Cursive', cursive, sans-serif;
+  }
+  .font-display {
+    font-family: 'Outfit', sans-serif;
+  }
+  .font-body {
+    font-family: 'Plus Jakarta Sans', sans-serif;
+  }
+}
+
+/* Realistic Notebook Paper Backgrounds */
+.ruled-paper {
+  background-color: #fdfbf7;
+  background-image: 
+    linear-gradient(90deg, transparent 64px, #fca5a5 64px, #fca5a5 66px, transparent 66px),
+    linear-gradient(#e2e8f0 1px, transparent 1px);
+  background-size: 100% 100%, 100% 32px;
+  background-position: 0 0, 0 80px;
+}
+
+.graph-paper {
+  background-color: #fcfcf9;
+  background-image:
+    linear-gradient(to right, rgba(99, 102, 241, 0.08) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(99, 102, 241, 0.08) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+.blank-paper {
+  background-color: #faf8f5;
+}
+
+/* Custom scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.6);
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(99, 102, 241, 0.3);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(99, 102, 241, 0.6);
+}
+
+/* Hand ink effects */
+.ink-blue {
+  color: #1e3a8a;
+  text-shadow: 0 0 0.5px rgba(30, 58, 138, 0.4);
+}
+.ink-black {
+  color: #18181b;
+  text-shadow: 0 0 0.4px rgba(24, 24, 27, 0.5);
+}
+.ink-gel-blue {
+  color: #1d4ed8;
+  text-shadow: 0 0 1px rgba(29, 78, 216, 0.4);
+}
+.ink-gel-black {
+  color: #09090b;
+  text-shadow: 0 0 1px rgba(9, 9, 11, 0.5);
+}
+
